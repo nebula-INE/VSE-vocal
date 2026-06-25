@@ -80,6 +80,8 @@ except ImportError as e:
     from .keyboard_sidebar_widget import KeyboardSidebarWidget
     from .core_manager import vose_manager
     from ..audio.voice_manager import VoiceManager
+    from .audio_mixin import AudioOutputMixin
+    from .voice_mixin import VoiceManagerMixin
 
 # MainWindow を機能ごとに分割した Mixin 群。
 # ここでの import は main_window.py を逆 import しないため、循環 import は発生しない。
