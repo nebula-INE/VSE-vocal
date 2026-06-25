@@ -4,7 +4,6 @@ AudioOutputMixin — MainWindow への AudioOutput 機能注入
 実体は modules/audio/audio_output.py の AudioOutput クラスに委譲します。
 """
 from __future__ import annotations
-from typing import TYPE_CHECKING
 
 try:
     from modules.audio.audio_output import AudioOutput
