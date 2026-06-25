@@ -70,6 +70,8 @@ try:
     from modules.audio.voice_manager import VoiceManager # type: ignore[assignment]
     from modules.gui.aural_engine import AuralAIEngine # type: ignore[assignment]
     from modules.data.licensing import LicenseManager # type: ignore[assignment]
+    from modules.gui.audio_mixin import AudioOutputMixin # type: ignore[assignment]
+    from modules.gui.voice_mixin import VoiceManagerMixin # type: ignore[assignment]
 except ImportError as e:
     print(f"⚠️ Absolute import failed, falling back to relative: {e}")
     # フォールバック（相対インポート）
@@ -1102,7 +1104,8 @@ class AnalysisThread(QThread):
 # メインウィンドウクラス
 # ==============================================================================
 
-class MainWindow(QMainWindow, ProjectIOMixin, AudioOutputMixin, VoiceManagerMixin):
+class MainWindow(ProjectIOMixin, AudioOutputMixin, VoiceManagerMixin, QMainWindow):
+
     """VO-SE Pro  メインウィンドウ"""
     
     # === メインUIウィジェット系（遅延生成 → Optional） ===
