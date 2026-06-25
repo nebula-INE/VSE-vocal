@@ -1,14 +1,10 @@
 # modules/gui/audio_mixin.py
-"""
-AudioOutputMixin — MainWindow への AudioOutput 機能注入
-実体は modules/audio/audio_output.py の AudioOutput クラスに委譲します。
-"""
 from __future__ import annotations
 
 try:
     from modules.audio.audio_output import AudioOutput
 except ImportError:
-    from ..audio.audio_output import AudioOutput
+    from ..audio.audio_output import AudioOutput  # type: ignore[import]
 
 
 class AudioOutputMixin:
@@ -27,5 +23,9 @@ class AudioOutputMixin:
 
     def get_audio_latency(self) -> float:
         if hasattr(self, "audio_output"):
-            return self.audio_output.get_latency()
+            latency = self.audio_output.get_latency()
+            # sounddevice の latency は (input, output) の tuple を返す場合がある
+            if isinstance(latency, tuple):
+                return float(latency[1])  # 出力遅延のみを返す
+            return float(latency)
         return 0.0
