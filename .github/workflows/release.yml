@@ -1,0 +1,745 @@
+name: "🚀 Release VO-SE vocal (Official Edition)"
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15-intel, macos-15, ubuntu-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          
+# 1. 依存関係を先にインストール（最重要）
+      - name: Install dependencies
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_MEDIA_BACKEND: ffmpeg
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r requirements.txt
+          # python-rtmidi と mido を明示的に追加して Runner 環境に流し込む
+          python -m pip install "setuptools<82" pytest ruff pyright python-rtmidi mido
+          python -m pip install pyinstaller
+
+      # 2. OS依存ライブラリを入れる
+      - name: Install OS dependencies
+        shell: bash
+        run: |
+            if [ "${{ runner.os }}" == "Windows" ]; then
+                choco install libsndfile -y
+            elif [ "${{ runner.os }}" == "macOS" ]; then
+                brew install portaudio libsndfile
+            elif [ "${{ runner.os }}" == "Linux" ]; then
+                sudo apt-get update
+                sudo apt-get install -y \
+                  libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 \
+                  libdbus-1-3 libxcb-cursor0 libxrender1 libxi6 \
+                  libsm6 libxext6 libfontconfig1 \
+                  libpulse0 libasound2t64 libsndfile1 portaudio19-dev
+            fi
+            
+          
+
+
+
+      - name: Ruff Check and Fix (Windows only)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: ruff check . --select E,F --ignore E501,E401 --fix --exit-zero
+
+      - name: 🔍 audioio.h を探す
+        if: startsWith(matrix.os, 'macos')
+        run: find . -name "audioio.h" | sort
+
+      - name: 🎙️ Generate Voice Data Header
+        run: |
+          python modules/tools/pack_all_voices.py
+
+      - name: Auto Commit Fixes
+        if: matrix.os == 'windows-latest'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "style: ruff auto-fix unused imports"
+          commit_user_name: github-actions[bot]
+          commit_user_email: github-actions[bot]@users.noreply.github.com
+
+      - name: 🛠️ Setup MSVC (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: 🛠️ Build VOSE Core (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: cmd
+        run: |
+          if not exist bin mkdir bin
+          copy include\world\*.h src\world\
+
+          :: WORLDのソースを先にコンパイルしてオブジェクトファイルを作る
+          cl.exe /std:c++17 /EHsc /O2 /D_USE_MATH_DEFINES ^
+            /I src /I include /I src\world ^
+            /c src\world\*.cpp
+
+          :: vose_core.cpp と WORLDのオブジェクトをまとめてDLLにリンク
+          cl.exe /std:c++17 /EHsc /O2 /LD /D_USE_MATH_DEFINES ^
+            /Fe:bin\vose_core.dll ^
+            src\vose_core.cpp *.obj ^
+            /I src /I include /I src\world ^
+            /link
+   
+      - name: 🛠️ Build VOSE Core (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          mkdir -p bin
+          cp include/world/*.h src/world/
+          cd src/world
+
+          echo "🔨 Compiling WORLD source files..."
+          for f in *.cpp; do
+            [ -e "$f" ] || continue
+            echo "  Compiling $f..."
+            clang++ -O3 -c -std=c++17 -stdlib=libc++ -mmacosx-version-min=11.0 \
+              -arch x86_64 -arch arm64 \
+              -I. -I.. -I../../include \
+              "$f"
+          done
+
+          for f in *.c; do
+            [ -e "$f" ] || continue
+            echo "  Compiling $f..."
+            clang -O3 -c -mmacosx-version-min=11.0 \
+              -arch x86_64 -arch arm64 \
+              -I. -I.. -I../../include \
+              "$f"
+          done
+
+          cd ../..
+
+          echo "🔗 Linking all objects into libvose_core.dylib..."
+          clang++ -O3 -dynamiclib -std=c++17 -stdlib=libc++ \
+            -mmacosx-version-min=11.0 \
+            -arch x86_64 -arch arm64 \
+            -I./src \
+            -I./include \
+            -I./src/world \
+            -o bin/libvose_core.dylib \
+            src/vose_core.cpp \
+            src/world/*.o
+
+          echo "✅ Build Complete: bin/libvose_core.dylib"
+          ls -l bin/libvose_core.dylib
+
+      - name: 🛠️ Build VOSE Core (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bin build/linux-world
+          cp include/world/*.h src/world/
+
+          echo "🔨 Compiling WORLD source files for Linux..."
+          for f in src/world/*.cpp; do
+            [ -e "$f" ] || continue
+            obj="build/linux-world/$(basename "${f%.cpp}").o"
+            echo "  Compiling $f -> $obj"
+            g++ -O3 -fPIC -c -std=c++17 \
+              -D_USE_MATH_DEFINES \
+              -I./src -I./include -I./src/world \
+              "$f" -o "$obj"
+          done
+
+          echo "🔗 Linking all objects into libvose_core.so..."
+          g++ -O3 -fPIC -shared -std=c++17 \
+            -Wl,-soname,libvose_core.so \
+            -I./src -I./include -I./src/world \
+            -o bin/libvose_core.so \
+            src/vose_core.cpp \
+            build/linux-world/*.o
+
+          echo "✅ Build Complete: bin/libvose_core.so"
+          ls -l bin/libvose_core.so
+
+      - name: Package with PyInstaller
+        shell: bash
+        run: |
+          # OSに応じた正確なファイル名とパス設定
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            ICON="assets/icon.ico"
+            CORE_LIB="bin/vose_core.dll;bin"
+            PATH_SEP=";"
+            NAME="VO-SE_vocal_Win"
+          elif [ "${{ runner.os }}" == "macOS" ]; then
+            ICON="assets/icon.icns"
+            # ビルドステップで生成される「libvose_core.dylib」に正確に合わせます
+            CORE_LIB="bin/libvose_core.dylib:bin"
+            PATH_SEP=":"
+            NAME="VO-SE_vocal_Mac"
+          else
+            ICON="assets/icon.ico"
+            CORE_LIB="bin/libvose_core.so:bin"
+            PATH_SEP=":"
+            NAME="VO-SE_vocal_Linux"
+          fi
+
+          # PyInstallerの実行（main.pyから直接自動生成）
+          python -m PyInstaller --noconsole --onefile --clean \
+            --paths . \
+            --paths modules \
+            --icon="$ICON" \
+            --hidden-import=modules.gui.main_window \
+            --hidden-import=backports \
+            --hidden-import=backports.tarfile \
+            --collect-all=sounddevice \
+            --collect-all=soundfile \
+            --add-data "$CORE_LIB" \
+            --add-data "assets${PATH_SEP}assets" \
+            --add-data "modules${PATH_SEP}modules" \
+            --name "$NAME" main.py
+
+      - name: Verify pkg_resources for PyInstaller hook
+        shell: python
+        run: |
+          import pkg_resources
+          print("pkg_resources file:", getattr(pkg_resources, "__file__", "unknown"))
+          print("has NullProvider:", hasattr(pkg_resources, "NullProvider"))
+          if not hasattr(pkg_resources, "NullProvider"):
+              raise SystemExit("pkg_resources.NullProvider is missing")
+              
+      - name: Generate macOS entitlements plist
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          cat > macos-entitlements.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.disable-library-validation</key>
+            <true/>
+            <key>com.apple.security.cs.allow-jit</key>
+            <true/>
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+            <true/>
+            <key>com.apple.security.device.audio-input</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+
+      - name: Create User Dictionary (if needed)
+        shell: python
+        run: |
+          import os
+          try:
+              import pyopenjtalk
+              if hasattr(pyopenjtalk, 'create_user_dict') and os.path.exists('user.csv'):
+                  pyopenjtalk.create_user_dict('user.dic', 'user.csv')
+                  print('User dictionary created successfully.')
+              else:
+                  print('Skip dict creation: No user.csv or function missing')
+          except Exception as e:
+              print(f'Skip dict creation: {e}')
+
+      # ── ① バージョンをソースに埋め込む ──────────────────────────
+      - name: Inject version into update_checker.py
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.0.0-dev' }}
+        run: |
+          echo "Injecting version: $RELEASE_VERSION"
+
+
+          python - << 'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"].removeprefix("v")
+          checker = Path("modules/updater/update_checker.py")
+          checker.parent.mkdir(parents=True, exist_ok=True)
+
+          if checker.exists():
+              text = checker.read_text(encoding="utf-8")
+              text = re.sub(
+                  r'^CURRENT_VERSION = .*$',
+                  f'CURRENT_VERSION = "{version}"',
+                  text,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+              if 'CURRENT_VERSION = ' not in text:
+                  text = f'CURRENT_VERSION = "{version}"\n' + text
+          else:
+              text = (
+                  'import json, threading, urllib.request\n'
+                  'from packaging.version import Version\n\n'
+                  f'CURRENT_VERSION = "{version}"\n'
+                  'GITHUB_API_URL = "https://api.github.com/repos/YOUR_ORG/VO-SE-vocal/releases/latest"\n\n'
+                  'class UpdateChecker:\n'
+                  '    def check_async(self, callback):\n'
+                  '        threading.Thread(target=self._check, args=(callback,), daemon=True).start()\n\n'
+                  '    def _check(self, callback):\n'
+                  '        try:\n'
+                  '            req = urllib.request.Request(GITHUB_API_URL, headers={"User-Agent": "VO-SE-vocal"})\n'
+                  '            with urllib.request.urlopen(req, timeout=5) as res:\n'
+                  '                data = json.loads(res.read())\n'
+                  '            latest = data["tag_name"].lstrip("v")\n'
+                  '            page_url = data["html_url"]\n'
+                  '            assets = data.get("assets", [])\n'
+                  '            exe_url = next((a["browser_download_url"] for a in assets if a["name"].endswith("_update.zip") or a["name"].endswith(".exe")), None)\n'
+                  '            if Version(latest) > Version(CURRENT_VERSION):\n'
+                  '                callback(True, latest, page_url, exe_url)\n'
+                  '            else:\n'
+                  '                callback(False, latest, None, None)\n'
+                  '        except Exception:\n'
+                  '            callback(None, None, None, None)\n'
+              )
+
+          checker.write_text(text, encoding="utf-8")
+          PY
+          echo "Done. CURRENT_VERSION is now ${RELEASE_VERSION#v}"
+
+      - name: Lint with Ruff
+        run: |
+          ruff check . --select E,F --ignore E501,E401 --fix --exit-zero
+
+      - name: Type Check with Pyright
+        run: |
+          pyright .
+
+      - name: Pack Official Voice Data
+        shell: bash
+        run: |
+          # 1. 括弧のスペースを修正してスクリプトを検索
+          TARGET_SCRIPT=$(find . \( -name "pack_voice.py" -o -name "pack_all_voices.py" \) -type f | head -n 1)
+          
+          if [ -n "$TARGET_SCRIPT" ]; then
+            echo "Found script: $TARGET_SCRIPT"
+            
+            # 2. ディレクトリ移動のトラブルを防ぐため、絶対パスを取得
+            ABS_SCRIPT_PATH=$(pwd)/${TARGET_SCRIPT#./}
+            SCRIPT_DIR=$(dirname "$ABS_SCRIPT_PATH")
+            SCRIPT_NAME=$(basename "$ABS_SCRIPT_PATH")
+            
+            # 3. ディレクトリを移動して実行（pushd / popd の方が安全）
+            pushd "$SCRIPT_DIR" > /dev/null
+            python "$SCRIPT_NAME"
+            popd > /dev/null
+          else
+            echo "Error: Packing script not found."
+            exit 1
+          fi
+
+
+      - name: Package App
+        shell: bash
+        run: |
+          rm -rf dist build dist_out
+          mkdir dist_out
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            pyinstaller --noconsole --onefile --clean \
+              --paths modules \
+              --icon="assets/icon.ico" \
+              --hidden-import=modules.gui.main_window \
+              --hidden-import=rtmidi \
+              --hidden-import=mido.backends.rtmidi \
+              --hidden-import=backports \
+              --hidden-import=backports.tarfile \
+              --collect-all=sounddevice \
+              --collect-all=soundfile \
+              --collect-all=pyopenjtalk \
+              --add-data "bin/vose_core.dll;bin" \
+              --add-data "assets;assets" \
+              --add-data "modules;modules" \
+              --name "VO-SE_vocal_Win" main.py
+            cp dist/VO-SE_vocal_Win.exe dist_out/
+          elif [ "${{ runner.os }}" = "Linux" ]; then
+            echo "Building Linux app on runner: ${{ matrix.os }}"
+            pyinstaller --noconsole --onefile --clean \
+              --paths modules \
+              --icon="assets/icon.ico" \
+              --hidden-import=modules.gui.main_window \
+              --hidden-import=rtmidi \
+              --hidden-import=mido.backends.rtmidi \
+              --hidden-import=backports \
+              --hidden-import=backports.tarfile \
+              --collect-all=sounddevice \
+              --collect-all=soundfile \
+              --collect-all=pyopenjtalk \
+              --add-data "bin/libvose_core.so:bin" \
+              --add-data "assets:assets" \
+              --add-data "modules:modules" \
+              --name "VO-SE_vocal_Linux" main.py
+            chmod +x dist/VO-SE_vocal_Linux
+            cp dist/VO-SE_vocal_Linux dist_out/VO-SE_vocal_Linux_x86_64
+          else
+            echo "Building macOS app on runner: ${{ matrix.os }}"
+            if [ "${{ matrix.os }}" = "macos-15-intel" ]; then
+              MAC_ARCH="x86_64"
+              MAC_LABEL="Intel"
+            else
+              MAC_ARCH="arm64"
+              MAC_LABEL="AppleSilicon"
+            fi
+
+            pyinstaller --noconsole --windowed --clean \
+              --target-arch "$MAC_ARCH" \
+              --paths modules \
+              --icon="assets/icon.icns" \
+              --exclude-module PySide6.QtPdf \
+              --hidden-import=modules.gui.main_window \
+              --hidden-import=rtmidi \
+              --hidden-import=mido.backends.rtmidi \
+              --hidden-import=backports \
+              --hidden-import=backports.tarfile \
+              --collect-all=sounddevice \
+              --collect-all=soundfile \
+              --collect-all=pyopenjtalk \
+              --add-data "bin/libvose_core.dylib:bin" \
+              --add-data "assets:assets" \
+              --add-data "modules:modules" \
+              --name "VO-SE_vocal_Mac" main.py
+            chmod +x dist/VO-SE_vocal_Mac.app/Contents/MacOS/VO-SE_vocal_Mac
+            
+            echo "macOS app bundle is ready for signing before packaging."
+          fi
+
+      - name: Verify macOS binary linkage
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_BIN="dist/VO-SE_vocal_Mac.app/Contents/MacOS/VO-SE_vocal_Mac"
+          test -f "$APP_BIN"
+          chmod +x "$APP_BIN"
+          echo "== otool main binary =="
+          otool -L "$APP_BIN"
+          echo "== verify bundled vose core =="
+          find dist -name "libvose_core.dylib" -type f
+
+      - name: 🍎 Verify and Fix macOS Library Linkage (Complete & Final)
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 1. アプリケーションの実行バイナリを確実に特定する（.app形式とonedir形式の両方に対応）
+          APP_BIN=$(find dist -type f -name "VO-SE_vocal_Mac" | grep -E "\.app/Contents/MacOS/" | head -n 1)
+          if [ -z "$APP_BIN" ]; then
+            # .app が見つからない場合は通常のバイナリを検索
+            APP_BIN=$(find dist -type f -name "VO-SE_vocal_Mac" | head -n 1)
+          fi
+
+          if [ -z "$APP_BIN" ]; then
+            echo "Error: APP_BIN (VO-SE_vocal_Mac) not found in dist/"
+            exit 1
+          fi
+          echo "Found APP_BIN: $APP_BIN"
+          chmod +x "$APP_BIN"
+
+          # 2. dylib を検索して、参照パス（install_name）の書き換えと個別署名を行う
+          find dist -name "libvose_core.dylib" -type f | while read -r DYLIB_BIN; do
+            echo "Processing dylib: $DYLIB_BIN"
+            chmod 755 "$DYLIB_BIN"
+            LIB_NAME=$(basename "$DYLIB_BIN")
+            
+            # 自身のIDを確定
+            install_name_tool -id "@loader_path/$LIB_NAME" "$DYLIB_BIN"
+            
+            # アプリ本体側が持っている古い参照パスを取得
+            OLD_REF=$(otool -L "$APP_BIN" | grep "libvose_core" | awk '{print $1}' || true)
+            if [ -n "$OLD_REF" ]; then
+              echo "Changing reference in app from $OLD_REF to @executable_path/../Frameworks/bin/$LIB_NAME"
+              install_name_tool -change "$OLD_REF" "@executable_path/../Frameworks/bin/$LIB_NAME" "$APP_BIN" || true
+            fi
+            
+            # パス変更によって壊れた署名を一度アドホック署名で直す
+            codesign --force --sign - "$DYLIB_BIN"
+          done
+
+          # 3. アプリケーション全体の再署名（.app があれば .app を、なければ親ディレクトリを対象にする）
+          APP_BUNDLE=$(find dist -maxdepth 2 -name "VO-SE_vocal_Mac.app" -type d | head -n 1)
+          if [ -n "$APP_BUNDLE" ]; then
+            echo "Signing app bundle: $APP_BUNDLE"
+            # 内部の個別ファイルをすべてアドホック署名
+            find "$APP_BUNDLE" -type f \( -name "*.dylib" -o -name "*.so" -o -name "VO-SE_vocal_Mac" \) -exec codesign --force --options runtime --sign - {} \;
+            # 最後に .app 自体を署名（これが正しいネスト署名の順番です）
+            codesign --force --deep --options runtime --entitlements macos-entitlements.plist --sign - "$APP_BUNDLE"
+            
+            echo "Verifying signature..."
+            codesign --verify --deep --strict "$APP_BUNDLE"
+            spctl --assess --type execute "$APP_BUNDLE" || true
+          else
+            echo "No .app bundle found. Signing individual files in dist..."
+            find dist -type f \( -name "*.dylib" -o -name "*.so" -o -name "VO-SE_vocal_Mac" \) -exec codesign --force --sign - {} \;
+          fi
+          echo "✅ macOS Linkage & Code Signing completed successfully!"
+
+      
+      - name: Smoke test packaged app startup
+        shell: python
+        env:
+          VOSE_STARTUP_SMOKE_TEST: "1"
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          import os
+          import subprocess
+          import sys
+          import time
+
+          env_copy = os.environ.copy()
+          env_copy["QT_QPA_PLATFORM"] = "offscreen"
+          env_copy["QT_MEDIA_BACKEND"] = "ffmpeg"
+          env_copy["VOSE_STARTUP_SMOKE_TEST"] = "1"
+
+          if "${{ matrix.os }}" == "windows-latest":
+              app_path = os.path.join("dist", "VO-SE_vocal_Win.exe")
+          elif "${{ runner.os }}" == "Linux":
+              app_path = os.path.join("dist", "VO-SE_vocal_Linux")
+          else:
+              app_path = os.path.join(
+                  "dist",
+                  "VO-SE_vocal_Mac.app",
+                  "Contents",
+                  "MacOS",
+                  "VO-SE_vocal_Mac",
+              )
+
+          print(f"Smoke testing packaged app: {app_path}")
+          if not os.path.exists(app_path):
+              raise SystemExit(f"Packaged app executable not found: {app_path}")
+
+          proc = subprocess.Popen(
+              [app_path],
+              env=env_copy,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              text=True
+          )
+
+          print("Waiting 5 seconds to verify application stability...")
+          time.sleep(5)
+
+          return_code = proc.poll()
+
+          if return_code is None:
+              # 💡 Windowsでのエンコードエラーを防ぐため、絵文字(✅)をすべて排除
+              print("SUCCESS: App is running stably without crashing. Terminating for CI flow.")
+              proc.terminate()
+              try:
+                  proc.wait(timeout=3)
+              except subprocess.TimeoutExpired:
+                  proc.kill()
+              print("SUCCESS: Smoke test passed successfully (Process verified)!")
+          else:
+              stdout, stderr = proc.communicate()
+              print("--- STDOUT ---")
+              print(stdout)
+              print("--- STDERR ---")
+              print(stderr, file=sys.stderr)
+              print(f"ERROR: Application crashed on startup with exit code: {return_code}")
+              raise SystemExit(return_code)
+
+      - name: 🍎 Optional notarize macOS app (recommended)
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP_BUNDLE="dist/VO-SE_vocal_Mac.app"
+          ZIP_PATH="dist_out/VO-SE_vocal_Mac_notarize.zip"
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "Skip notarization: secrets not set"
+            exit 0
+          fi
+          if [ ! -d "$APP_BUNDLE" ]; then
+            echo "Skip notarization: app bundle not found"
+            exit 0
+          fi
+          ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+          xcrun notarytool submit "$ZIP_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$APP_BUNDLE"
+          spctl --assess --type execute "$APP_BUNDLE"
+
+      - name: 💿 Package signed macOS artifacts
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ matrix.os }}" = "macos-15-intel" ]; then
+            MAC_LABEL="Intel"
+          else
+            MAC_LABEL="AppleSilicon"
+          fi
+
+          APP_BUNDLE="dist/VO-SE_vocal_Mac.app"
+          if [ ! -d "$APP_BUNDLE" ]; then
+            echo "Error: app bundle not found at $APP_BUNDLE"
+            exit 1
+          fi
+
+          mkdir -p dist_out
+          echo "🍺 Installing create-dmg..."
+          brew install create-dmg
+
+          echo "💿 Generating signed DMG..."
+          create-dmg \
+            --volname "VO-SE vocal" \
+            --background "assets/dmg_bg.png" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "VO-SE_vocal_Mac.app" 150 185 \
+            --app-drop-link 450 185 \
+            "dist_out/VO-SE_vocal_Mac_${MAC_LABEL}.dmg" \
+            "dist/"
+
+          echo "🗜️ Generating signed update ZIP..."
+          (cd dist && zip -ry "../dist_out/VO-SE_vocal_Mac_${MAC_LABEL}_update.zip" VO-SE_vocal_Mac.app)
+
+      - name: 🐧 Package Linux artifacts
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/VO-SE_vocal_Linux
+          mkdir -p dist_out
+          chmod +x dist/VO-SE_vocal_Linux
+          tar -C dist -czf dist_out/VO-SE_vocal_Linux_x86_64.tar.gz VO-SE_vocal_Linux
+          cp dist/VO-SE_vocal_Linux dist_out/VO-SE_vocal_Linux_x86_64
+
+
+      - name: 📦 Save Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: VO-SE-vocal-Package-${{ matrix.os }}
+          path: dist_out/
+
+  smoke-linux:
+    name: Linux GUI dependency smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install OS deps for PySide6
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 \
+            libdbus-1-3 libxcb-cursor0 libxrender1 libxi6 \
+            libsm6 libxext6 libfontconfig1 \
+            libpulse0 libasound2t64 libsndfile1 portaudio19-dev
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r requirements.txt
+
+      - name: Startup smoke import
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - << 'PY'
+          import main
+          missing = main._check_runtime_requirements()
+          print("missing:", missing)
+          assert not missing, f"missing deps: {missing}"
+          print("OK: startup requirements satisfied")
+          PY
+
+  publish:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: [build, smoke-linux]
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: VO-SE-vocal-Package-*
+          merge-multiple: true
+          path: dist_out
+
+      - name: Ensure dist_out exists
+        run: mkdir -p dist_out
+
+      - name: Show release files
+        run: |
+          mkdir -p dist_out
+          ls -la dist_out || true
+
+      - name: Upload Release (tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ format('VO-SE vocal {0}', github.ref_name) }}
+          prerelease: false
+          fail_on_unmatched_files: false
+          make_latest: true
+          files: |
+            dist_out/VO-SE_vocal_Win.exe
+            dist_out/VO-SE_vocal_Mac_AppleSilicon.dmg
+            dist_out/VO-SE_vocal_Mac_AppleSilicon_update.zip
+            dist_out/VO-SE_vocal_Mac_Intel.dmg
+            dist_out/VO-SE_vocal_Mac_Intel_update.zip
+            dist_out/VO-SE_vocal_Linux_x86_64.tar.gz
+            dist_out/VO-SE_vocal_Linux_x86_64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Release (dev build)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-dev
+          name: VO-SE vocal (Dev Build)
+          prerelease: true
+          fail_on_unmatched_files: false
+          files: |
+            dist_out/VO-SE_vocal_Win.exe
+            dist_out/VO-SE_vocal_Mac_AppleSilicon.dmg
+            dist_out/VO-SE_vocal_Mac_AppleSilicon_update.zip
+            dist_out/VO-SE_vocal_Mac_Intel.dmg
+            dist_out/VO-SE_vocal_Mac_Intel_update.zip 
+            dist_out/VO-SE_vocal_Linux_x86_64.tar.gz
+            dist_out/VO-SE_vocal_Linux_x86_64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
