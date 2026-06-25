@@ -1,0 +1,26 @@
+{
+  "include": ["."],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__"
+  ],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none",
+  "extraPaths": [
+    ".",
+    "modules",
+    "modules/gui/mixins"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        ".",
+        "modules",
+        "modules/gui/mixins"
+      ]
+    }
+  ]
+}
