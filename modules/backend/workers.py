@@ -12,8 +12,8 @@ class MidiLoadWorker(QObject):
     メインスレッド（UI）を止めずに、バックグラウンドで重いMIDIバイナリデータを
     パースしてノート配列を抽出するワーカー。
     """
-    finished = pyqtSignal(list)  # 解析完了後にNoteEvent（または生データ）のリストを返す
-    error = pyqtSignal(str)      # 例外発生時にエラーメッセージを通知
+    finished = pyqtSignal(list)
+    error = pyqtSignal(str)
 
     def __init__(self, file_path, midi_manager):
         super().__init__()
@@ -25,8 +25,6 @@ class MidiLoadWorker(QObject):
         try:
             if not os.path.exists(self.file_path):
                 raise FileNotFoundError(f"MIDIファイルが見つかりません: {self.file_path}")
-            
-            # midi_manager内部の重いバイナリ解析処理をBGM実行
             notes = self.midi_manager.load_midi_pure_data(self.file_path)
             self.finished.emit(notes)
         except Exception as e:
@@ -41,8 +39,8 @@ class VoiceImportWorker(QObject):
     巨大な歌声ライブラリ（ZIP）の解凍、および展開先でのフォルダ構築を
     UIスレッドを1ミリもフリーズさせずに実行するワーカー。
     """
-    progress = pyqtSignal(int)    # 進捗率（0-100%）をリアルタイム通信
-    finished = pyqtSignal(str)   # 完了時に対象の音源フォルダ名を返す
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
     def __init__(self, zip_path, target_dir):
@@ -56,7 +54,6 @@ class VoiceImportWorker(QObject):
             if not os.path.exists(self.zip_path):
                 raise FileNotFoundError(f"音源ZIPファイルが見つかりません: {self.zip_path}")
 
-            # ZIPの総解凍サイズをあらかじめ計算（パーセンテージ算出用）
             with zipfile.ZipFile(self.zip_path, 'r') as zip_ref:
                 infolist = zip_ref.infolist()
                 uncompress_size = sum((file.file_size for file in infolist))
@@ -64,7 +61,6 @@ class VoiceImportWorker(QObject):
                 
                 os.makedirs(self.target_dir, exist_ok=True)
 
-                # 1ファイルずつ解凍しながら進捗をUIへブロードキャスト
                 for file in infolist:
                     zip_ref.extract(file, self.target_dir)
                     extracted_size += file.file_size
@@ -86,7 +82,11 @@ class ProjectSaveWorker(QObject):
     """
     タイムライン上の数千〜数万個のオブジェクトデータをJSONシリアライズし、
     ディスクI/Oブロックを起こさずに安全に書き出すワーカー。
-    アトミック書き込みを採用し、保存失敗時のファイル破損を根本から防止。
+
+    [FIX] アトミック書き込みに os.replace() を使用するよう変更。
+    旧実装の os.remove() + os.rename() は Windows では既存ファイルへの
+    rename が失敗する（PermissionError）ことがある。
+    os.replace() は POSIX でも Windows でも原子的に置き換えを行う。
     """
     finished = pyqtSignal()
     error = pyqtSignal(str)
@@ -98,21 +98,34 @@ class ProjectSaveWorker(QObject):
 
     @pyqtSlot()
     def run(self):
+        temp_name = None
         try:
             dir_name = os.path.dirname(self.file_path)
             if dir_name and not os.path.exists(dir_name):
                 os.makedirs(dir_name, exist_ok=True)
 
-            # 💡 安全対策：一時ファイルに先に書き出し、完全に成功したら置換（アトミック書き込み）
-            with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, encoding='utf-8') as tf:
+            # 一時ファイルへ書き出し
+            with tempfile.NamedTemporaryFile(
+                'w',
+                dir=dir_name or None,
+                delete=False,
+                encoding='utf-8',
+                suffix='.tmp'
+            ) as tf:
                 json.dump(self.project_data, tf, ensure_ascii=False, indent=4)
                 temp_name = tf.name
 
-            # 本番ファイルへ一瞬でアトミックに置き換え
-            if os.path.exists(self.file_path):
-                os.remove(self.file_path)
-            os.rename(temp_name, self.file_path)
+            # [FIX] os.replace() を使ってアトミックに置換（Windows対応）
+            # POSIX では rename(2) と同等。Windows でも既存ファイルを上書きできる。
+            os.replace(temp_name, self.file_path)
+            temp_name = None  # 成功したので後始末不要
 
             self.finished.emit()
         except Exception as e:
+            # 失敗時は一時ファイルを残さないようクリーンアップ
+            if temp_name and os.path.exists(temp_name):
+                try:
+                    os.remove(temp_name)
+                except OSError:
+                    pass
             self.error.emit(str(e))
