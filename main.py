@@ -5,23 +5,20 @@ import platform
 import ctypes
 import ctypes.util
 import json
+import threading
 
 import importlib
 from importlib.util import find_spec
 
-# main.py の上部、既存のインポート文の下に追加してください
-
 def global_exception_handler(exctype, value, tb):
     """
     アプリ全体の未キャッチ例外をすべて捕捉し、無言クラッシュを防ぐグローバルハンドラー。
-    予期せぬエラー発生時、ユーザーにダイアログで原因を明示します。
     """
     import traceback
     error_message = "".join(traceback.format_exception(exctype, value, tb))
     print(f"[Fatal Crash] {error_message}", file=sys.stderr)
     
     try:
-        # GUIがすでに起動している場合は、QMessageBoxでエラーを視覚的に表示
         from PySide6.QtWidgets import QApplication, QMessageBox
         if QApplication.instance():
             QMessageBox.critical(
@@ -37,7 +34,6 @@ def global_exception_handler(exctype, value, tb):
         
     sys.exit(1)
 
-# グローバル例外ハンドラーをシステムに登録
 sys.excepthook = global_exception_handler
 
 
@@ -68,9 +64,25 @@ def get_engine_library_path():
 
 
 # --- [2] 設定管理クラス (ConfigHandler) ---
+# [FIX] temp/ ではなく OS 標準のユーザーデータディレクトリを使用する。
+# PyInstaller バンドル後も書き込み権限が確保され、バージョンアップでも消えない。
+def _get_user_config_path() -> str:
+    """OS ごとの標準設定ディレクトリに config.json のパスを返す。"""
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        return os.path.join(base, "VO-SE Pro", "config.json")
+    elif system == "Darwin":
+        return os.path.expanduser("~/Library/Application Support/VO-SE Pro/config.json")
+    else:  # Linux / その他
+        xdg = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        return os.path.join(xdg, "vo-se-pro", "config.json")
+
+
 class ConfigHandler:
-    def __init__(self, config_path="temp/config.json"):
-        self.config_path = config_path
+    def __init__(self, config_path: str | None = None):
+        # config_path が明示的に渡されなければ OS 標準パスを使う
+        self.config_path = config_path if config_path else _get_user_config_path()
         self.default_config = {
             "last_save_dir": os.path.expanduser("~"),
             "default_voice": "mei_normal",
@@ -97,21 +109,23 @@ class ConfigHandler:
 
 
 # --- [3] エンジンクラス (VoSeEngine) ---
+# [FIX-SAMPLE-RATE] C++ コア (kFs_internal = 44100) に合わせて固定。
+_INTERNAL_SAMPLE_RATE = 44100
+
 class VoSeEngine:
     def __init__(self):
         self.os_name = platform.system()
         self.c_engine = None
+        # [FIX-LOCK] _lock を __init__ で確実に生成しレースコンディションを根絶する
+        self._lock = threading.Lock()
         self._load_c_engine()
 
     def _load_c_engine(self):
         """
         OSに応じたライブラリ（DLL/dylib）を最適なパスからロードします。
-        型チェックエラー（_MEIPASS）を回避し、Mac実機構造に対応した完全版です。
         """
-        # 1. 基本的なリソースパス
         dll_path = get_engine_library_path()
 
-        # 2. Mac特有のフォールバック処理
         if self.os_name == "Darwin":
             if not os.path.exists(dll_path):
                 meipass = getattr(sys, '_MEIPASS', None)
@@ -122,7 +136,6 @@ class VoSeEngine:
                         dll_path = alt_path
                         print(f"[Info] Mac Frameworks path used: {dll_path}")
 
-        # 3. 最終的なロード実行
         if os.path.exists(dll_path):
             try:
                 abs_dll_path = os.path.abspath(dll_path)
@@ -132,7 +145,6 @@ class VoSeEngine:
                 else:
                     self.c_engine = ctypes.CDLL(abs_dll_path, mode=10)  # RTLD_GLOBAL
 
-                # --- C関数の型定義 (歌唱・読み上げの両方に対応) ---
                 if hasattr(self.c_engine, 'process_voice'):
                     self.c_engine.process_voice.argtypes = [
                         ctypes.POINTER(ctypes.c_float),
@@ -147,12 +159,10 @@ class VoSeEngine:
                 if hasattr(sys, 'stderr'):
                     import traceback
                     traceback.print_exc()
-                self.c_engine = None  # 失敗時は明示的に None を保証
+                self.c_engine = None
         else:
-            # [FIX-1] 警告のみで続行せず、理由を明記したうえで None を確定する
-            # main() 側で QMessageBox.warning を表示するため、ここでは print のみ
             print(f"[Warning] C-Engine file not found at: {dll_path}")
-            self.c_engine = None  # 明示的に None を保証（後続クラッシュ防止）
+            self.c_engine = None
 
     def analyze_intonation(self, text):
         """【読み上げ用】音韻解析"""
@@ -164,26 +174,23 @@ class VoSeEngine:
         except Exception as e:
             return [f"Analysis failed: {str(e)}"]
 
-    def analyze_singing_pitch(self, notes, sample_rate=48000, frame_period_ms=5.0):
+    def analyze_singing_pitch(self, notes, frame_period_ms=5.0):
         """
         【歌唱用・WORLDエンジン連携】ノート列からF0カーブ（フレーム単位の周波数配列）を生成する。
-        notes: [{'note_number': 60, 'duration': 0.5}, ...] を想定。
 
-        ■ 変更・最適化ポイント:
-        - 複数スレッドからの想定外の操作や非同期エディット時、空要素や None が混入した際の例外耐性を強化。
-        - 毎回 `importlib.import_module("numpy")` を叩くコストを削減（一度インポートされたらキャッシュ）。
-        - 補間カーブ（Hanning窓）計算時、データ長が極端に短い（ノート切り替え直後など）ケースでの境界バグを排除。
+        [FIX-SAMPLE-RATE] sample_rate 引数を削除し、C++ コアと同じ kFs_internal=44100 に固定。
+        以前は Python 側がデフォルト 48000 Hz を使っており、C++ 側の 44100 Hz と
+        フレーム計算がずれてピッチエラーが生じていた。
         """
         print("--- WORLD歌唱ピッチ解析実行 ---")
         try:
-            # numpyを安全かつ低コストでロード
-            import sys
-            if "numpy" in sys.modules:
-                np = sys.modules["numpy"]
+            import sys as _sys
+            if "numpy" in _sys.modules:
+                np = _sys.modules["numpy"]
             else:
-                import importlib
-                np = importlib.import_module("numpy")
-     
+                import importlib as _il
+                np = _il.import_module("numpy")
+
             if not notes:
                 return np.zeros(1, dtype=np.float32)
 
@@ -198,7 +205,6 @@ class VoSeEngine:
 
             hz_segments = []
             for note in notes:
-                # [堅牢化] スレッド競合やエディタの非同期更新により、配列内に None や不正オブジェクトが混入するのをガード
                 if note is None:
                     continue
                 
@@ -218,13 +224,11 @@ class VoSeEngine:
                 try:
                     midi_value = float(midi_note)
                 except (TypeError, ValueError):
-                    midi_value = 69.0  # デフォルト（A4）
+                    midi_value = 69.0
 
-                # MIDIノート番号から周波数(Hz)への変換
                 hz = 440.0 * (2.0 ** ((midi_value - 69.0) / 12.0))
                 hz = min(max(hz, min_hz), max_hz)
 
-                # フレーム数の算出
                 frame_count = max(1, int(round(duration / frame_sec)))
                 hz_segments.append(np.full(frame_count, hz, dtype=np.float32))
 
@@ -233,10 +237,7 @@ class VoSeEngine:
 
             f0_curve = np.concatenate(hz_segments)
 
-            # ノート境界を滑らかに補間（簡易ポルタメント）
             smooth_window = max(1, int(round(0.03 / frame_sec)))  # 約30ms
-            
-            # [堅牢化] 総フレーム数が窓長より短い場合の境界エラーを徹底防止
             if smooth_window > 1 and len(f0_curve) > smooth_window:
                 kernel = np.hanning(smooth_window)
                 kernel_sum = float(kernel.sum())
@@ -248,71 +249,55 @@ class VoSeEngine:
 
         except Exception as e:
             print(f"[Error] analyze_singing_pitch failed: {e}")
-            # 万が一の予期せぬ不具合時も、後続のC++処理（process_with_c）でクラッシュを起こさないよう安全なゼロ配列を保証
             try:
-                import sys
-                if "numpy" in sys.modules:
-                    np = sys.modules["numpy"]
+                import sys as _sys
+                if "numpy" in _sys.modules:
+                    np = _sys.modules["numpy"]
                 else:
                     import numpy as np
+                # [FIX-NONE-RETURN] 最悪ケースでも None ではなくゼロ配列を返す。
+                # None を受け取った process_with_c が Segfault を起こすのを防ぐ。
                 return np.zeros(1, dtype=np.float32)
             except Exception:
-                # [修正] numpyのインポートすら完全に破綻している最悪のケースのフォールバック
-                # Pyrightのエラーを完全に回避しつつ、後続の process_with_c が安全に処理できる None を返します。
-                return None
+                # numpy すら壊れている場合は空リストで代替（C++ 側が長さ 0 を検知して skip）
+                return []
 
     def process_with_c(self, data_array, f0_array=None):
         """
         【共通処理】波形データとピッチデータ（WORLD F0カーブなど）をC++エンジンに送り込みます。
-        
-        ■ 変更・最適化ポイント:
-        - 再生スレッド、UIメーター描画、エディットスレッド等から同時にC++コアへ
-          アクセスした際のメモリ競合・破壊（Segfault）を防ぐため、Pythonの Lock (Mutex) を導入。
-        - numpyモジュールのロードにおいて、キャッシュ（sys.modules）を優先参照してリアルタイム処理時の
-          オーバーヘッドを極限まで削減。
         """
         if not self.c_engine or not hasattr(self.c_engine, 'process_voice'):
             print("[Warning] C-Engine not available, skipping processing")
             return data_array
 
-        # [スレッド安全の確保] スレッド間の競合を防ぐロックオブジェクトを動的に確保
-        if not hasattr(self, '_lock'):
-            import threading
-            self._lock = threading.Lock()
-
+        # [FIX-LOCK] _lock は __init__ で生成済みなので hasattr チェック不要
         try:
-            # numpyを安全かつ低コストでロード（毎回の探索オーバーヘッドを排除）
-            import sys
-            if "numpy" in sys.modules:
-                np = sys.modules["numpy"]
+            import sys as _sys
+            if "numpy" in _sys.modules:
+                np = _sys.modules["numpy"]
             else:
-                import importlib
-                np = importlib.import_module("numpy")
+                import importlib as _il
+                np = _il.import_module("numpy")
 
-            # 同時実行を防ぐため、ロックを獲得してC++コアへ突入
             with self._lock:
-                # 波形データの準備
                 wav_float = np.ascontiguousarray(data_array, dtype=np.float32)
                 wav_ptr = wav_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
                 length = len(wav_float)
 
-                # [FIX-2] f0_float を明示的に保持し、GCによるダングリングポインタを防ぐ
                 f0_float = None
                 f0_ptr = None
-                if f0_array is not None:
+                if f0_array is not None and len(f0_array) > 0:
                     f0_float = np.ascontiguousarray(f0_array, dtype=np.float32)
                     f0_ptr = f0_float.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
-                # C++エンジンの呼び出し（WORLD等のコア処理）
-                # ロック内かつスコープ内のため、wav_float・f0_float のメモリは100%安全に保護されます
                 self.c_engine.process_voice(wav_ptr, length, f0_ptr)
 
-            # [FIX-3] wav_float を返すことで GC による早期解放を防ぐ
             return wav_float
 
         except Exception as e:
             print(f"C-Process error: {e}")
             return data_array
+
 
 PYTHON_RUNTIME_PACKAGES = (
     "numpy",
@@ -359,28 +344,22 @@ OS_DEPENDENCY_INSTALL_HINTS = {
 
 def _is_os_library_loadable(library_lookup_name):
     library_path = ctypes.util.find_library(library_lookup_name)
-    # [修正] library_path が None の場合は、ctypes.CDLL に渡さず即座に False を返す
     if library_path is None:
         return False
-
     try:
         ctypes.CDLL(library_path)
     except OSError:
         return False
-
     return True
 
 
 def _check_runtime_requirements():
-    """
-    起動前に実行環境をチェックし、足りない要件をユーザーへ明示する。
-    """
+    """起動前に実行環境をチェックし、足りない要件をユーザーへ明示する。"""
     missing = []
 
     for module_name in PYTHON_RUNTIME_PACKAGES:
         if find_spec(module_name) is None:
             missing.append(f"Python package: {module_name}")
-    
 
     system_name = platform.system()
     check_os_libraries = not (getattr(sys, "frozen", False) and system_name == "Darwin")
@@ -405,7 +384,6 @@ def main():
             print(f"例: {install_hint}")
         sys.exit(1)
 
-    # Linuxヘッドレス環境（DISPLAYなし）では offscreen を既定にして起動を継続
     if platform.system() == "Linux":
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
             os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -442,8 +420,7 @@ def main():
         if os.path.exists(icon_path):
             app.setWindowIcon(QIcon(icon_path))
             break
-    # [FIX-1] DLL未検出時は warning ダイアログで明示。エラーではなく warning に留め、
-    #         アプリは起動継続（合成・歌唱機能のみ無効化）とする。
+
     dll_path = get_engine_library_path()
     if not os.path.exists(dll_path):
         QMessageBox.warning(
@@ -470,17 +447,16 @@ def main():
     window.vo_se_engine = engine
     window.config = config
 
-    # ステータスバーの状態を動的に更新（MainWindowにupdate_statusメソッドがあると仮定）
     if engine.c_engine:
         window.statusBar().showMessage("VO-SE Core Engine: Ready")
     else:
         window.statusBar().showMessage("VO-SE Core Engine: Not Found (Offline Mode)")
+
     if os.environ.get("VOSE_STARTUP_SMOKE_TEST") == "1":
         print("[SmokeTest] VO-SE Pro initialized successfully.")
         config_handler.save_config(config)
         app.quit()
         return 0
-
 
     def show_main_window():
         if window.isMinimized():
@@ -506,9 +482,6 @@ def main():
     result = app.exec()
     config_handler.save_config(config)
     return result
-
-
-
 
 
 if __name__ == "__main__":
