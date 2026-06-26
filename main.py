@@ -10,6 +10,16 @@ import threading
 import importlib
 from importlib.util import find_spec
 
+if sys.platform.startswith("win"):
+    try:
+        # Python 3.7+ の reconfigure を使う（推奨）
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        # reconfigure が無い環境や埋め込み環境向けのフォールバック
+        import os as _os
+        _os.environ.setdefault("PYTHONUTF8", "1")
+
 def global_exception_handler(exctype, value, tb):
     """
     アプリ全体の未キャッチ例外をすべて捕捉し、無言クラッシュを防ぐグローバルハンドラー。
