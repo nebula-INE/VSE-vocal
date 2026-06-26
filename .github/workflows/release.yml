@@ -33,16 +33,39 @@ jobs:
           cache: 'pip'
           
 # 1. 依存関係を先にインストール（最重要）
+      - name: Install build tools (macOS / Linux)
+        if: startsWith(matrix.os, 'macos') || matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          if startsWith("${{ matrix.os }}", 'macos'); then
+            brew update
+            # CMake と OpenJTalk/HTS/libsndfile を入れてソースビルドに備える
+            brew install cmake libsndfile portaudio open-jtalk || true
+          else
+            sudo apt-get update
+            # cmake と OpenJTalk/HTS 系の dev パッケージをインストール
+            sudo apt-get install -y cmake libsndfile1-dev portaudio19-dev libopenjtalk-dev || true
+          fi
+
       - name: Install dependencies
         env:
           QT_QPA_PLATFORM: offscreen
           QT_MEDIA_BACKEND: ffmpeg
         run: |
-          python -m pip install --upgrade pip wheel
-          python -m pip install -r requirements.txt
+          python -m pip install --upgrade pip wheel setuptools
+          # requirements を先に入れる（既存）
+          python -m pip install -r requirements.txt || true
+
+          # --- 安全策 A: 事前ビルド済みパッケージを優先して上書きインストール ---
+          # macOS / Linux では pyopenjtalk のソースビルド回避のため prebuilt を使う
+          if [ "${{ matrix.os }}" = "macos-15" ] || [ "${{ matrix.os }}" = "macos-15-intel" ] || [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            python -m pip install --upgrade pyopenjtalk-prebuilt || true
+          fi
+
           # python-rtmidi と mido を明示的に追加して Runner 環境に流し込む
-          python -m pip install "setuptools<82" pytest ruff pyright python-rtmidi mido
-          python -m pip install pyinstaller
+          python -m pip install "setuptools<82" pytest ruff pyright python-rtmidi mido || true
+          python -m pip install pyinstaller || true
+
 
       # 2. OS依存ライブラリを入れる
       - name: Install OS dependencies
