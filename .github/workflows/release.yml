@@ -258,6 +258,7 @@ jobs:
             --paths . \
             --paths modules \
             --icon="$ICON" \
+            --collect-all=PySide6 \
             --hidden-import=modules.gui.main_window \
             --hidden-import=backports \
             --hidden-import=backports.tarfile \
@@ -463,6 +464,7 @@ jobs:
               --paths modules \
               --icon="assets/icon.icns" \
               --exclude-module PySide6.QtPdf \
+              --collect-all=PySide6 \
               --hidden-import=modules.gui.main_window \
               --hidden-import=rtmidi \
               --hidden-import=mido.backends.rtmidi \
@@ -567,6 +569,8 @@ jobs:
           env_copy["QT_QPA_PLATFORM"] = "offscreen"
           env_copy["QT_MEDIA_BACKEND"] = "ffmpeg"
           env_copy["VOSE_STARTUP_SMOKE_TEST"] = "1"
+          # Ensure subprocess runs Python in UTF-8 mode on Windows
+          env_copy["PYTHONUTF8"] = "1"
 
           if "${{ matrix.os }}" == "windows-latest":
               app_path = os.path.join("dist", "VO-SE_vocal_Win.exe")
