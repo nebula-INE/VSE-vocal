@@ -56,32 +56,48 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 基本の pip ツールを最新化
+          # pip ツール更新
           python -m pip install --upgrade pip wheel setuptools
 
-          # requirements を先に入れる（既存）
-          python -m pip install -r requirements.txt || true
+          # --- Linux runner では最新の cmake / build tools を入れておく（任意保険） ---
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential cmake pkg-config git \
+              libsndfile1-dev portaudio19-dev libopenjtalk-dev swig || true
+          fi
 
-          # PyInstaller のアイコン変換に必要な Pillow と
-          # 起動に必要な GUI / オーディオ関連パッケージを確実に入れる
-          python -m pip install Pillow PySide6 sounddevice soundfile || true
-
-          # macOS / Linux では pyopenjtalk のソースビルド回避のため prebuilt を使う
+          # --- 事前ビルド済パッケージを先に入れて pyopenjtalk のソースビルドを回避 ---
           if [[ "${{ matrix.os }}" == macos* ]] || [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             python -m pip install --upgrade pyopenjtalk-prebuilt || true
           fi
+
+          # requirements をインストール（prebuilt があればそちらが優先されます）
+          python -m pip install -r requirements.txt || true
+
+          # 起動に必要なランタイム類を確実に入れる
+          python -m pip install Pillow PySide6 sounddevice soundfile || true
 
           # その他ツール類
           python -m pip install "setuptools<82" pytest ruff pyright python-rtmidi mido pyinstaller || true
 
           # デバッグ: インストール確認（CIログに出ます）
           python - <<'PY' || true
+          import importlib, sys
+          def show(pkg):
+              try:
+                  m = importlib.import_module(pkg)
+                  print(f"OK: {pkg} ->", getattr(m, "__version__", "version-unknown"))
+              except Exception as e:
+                  print(f"MISS: {pkg} -> {e}")
+          for p in ("pyopenjtalk","pyopenjtalk_prebuilt","PySide6","sounddevice","soundfile","PIL"):
+              show(p)
+          import subprocess
           try:
-              import PySide6, sounddevice, soundfile, PIL
-              print("DEBUG: PySide6, sounddevice, soundfile, Pillow OK")
+              subprocess.run(["cmake","--version"], check=False)
           except Exception as e:
-              print("DEBUG: import check failed:", e)
+              print("cmake check failed:", e)
           PY
+
 
       - name: Set UTF-8 encoding (Windows only)
         if: matrix.os == 'windows-latest'
