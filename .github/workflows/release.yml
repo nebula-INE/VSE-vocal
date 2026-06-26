@@ -48,6 +48,8 @@ jobs:
           fi
 
       - name: Install dependencies
+        if: startsWith(matrix.os, 'macos') || matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
+        shell: bash
         env:
           QT_QPA_PLATFORM: offscreen
           QT_MEDIA_BACKEND: ffmpeg
@@ -55,12 +57,12 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           # requirements を先に入れる（既存）
           python -m pip install -r requirements.txt || true
+          # PyInstaller のアイコン変換に必要な Pillow を確実に入れる
           python -m pip install Pillow || true
-
 
           # --- 安全策 A: 事前ビルド済みパッケージを優先して上書きインストール ---
           # macOS / Linux では pyopenjtalk のソースビルド回避のため prebuilt を使う
-          if [ "${{ matrix.os }}" = "macos-15" ] || [ "${{ matrix.os }}" = "macos-15-intel" ] || [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          if [[ "${{ matrix.os }}" == macos* ]] || [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             python -m pip install --upgrade pyopenjtalk-prebuilt || true
           fi
 
@@ -85,10 +87,6 @@ jobs:
                   libsm6 libxext6 libfontconfig1 \
                   libpulse0 libasound2t64 libsndfile1 portaudio19-dev
             fi
-            
-          
-
-
 
       - name: Ruff Check and Fix (Windows only)
         if: matrix.os == 'windows-latest'
@@ -97,9 +95,11 @@ jobs:
 
       - name: 🔍 audioio.h を探す
         if: startsWith(matrix.os, 'macos')
+        shell: bash
         run: find . -name "audioio.h" | sort
 
       - name: 🎙️ Generate Voice Data Header
+        shell: bash
         run: |
           python modules/tools/pack_all_voices.py
 
@@ -136,6 +136,7 @@ jobs:
    
       - name: 🛠️ Build VOSE Core (macOS)
         if: startsWith(matrix.os, 'macos')
+        shell: bash
         run: |
           mkdir -p bin
           cp include/world/*.h src/world/
@@ -229,6 +230,7 @@ jobs:
           fi
 
           # PyInstallerの実行（main.pyから直接自動生成）
+          # 注意: macOS の .app バンドルを作る場合は onedir を推奨（--onefile と .app は非推奨）
           python -m PyInstaller --noconsole --onefile --clean \
             --paths . \
             --paths modules \
@@ -348,10 +350,12 @@ jobs:
           echo "Done. CURRENT_VERSION is now ${RELEASE_VERSION#v}"
 
       - name: Lint with Ruff
+        shell: bash
         run: |
           ruff check . --select E,F --ignore E501,E401 --fix --exit-zero
 
       - name: Type Check with Pyright
+        shell: bash
         run: |
           pyright .
 
@@ -430,7 +434,8 @@ jobs:
               MAC_LABEL="AppleSilicon"
             fi
 
-            pyinstaller --noconsole --windowed --clean \
+            # macOS は .app バンドル作成時は onedir を推奨
+            pyinstaller --noconsole --windowed --clean --onedir \
               --target-arch "$MAC_ARCH" \
               --paths modules \
               --icon="assets/icon.icns" \
@@ -685,6 +690,7 @@ jobs:
           cache: 'pip'
 
       - name: Install OS deps for PySide6
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -694,6 +700,7 @@ jobs:
             libpulse0 libasound2t64 libsndfile1 portaudio19-dev
 
       - name: Install Python deps
+        shell: bash
         run: |
           python -m pip install --upgrade pip wheel
           python -m pip install -r requirements.txt
@@ -701,6 +708,7 @@ jobs:
       - name: Startup smoke import
         env:
           QT_QPA_PLATFORM: offscreen
+        shell: bash
         run: |
           python - << 'PY'
           import main
