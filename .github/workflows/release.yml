@@ -37,7 +37,7 @@ jobs:
         if: startsWith(matrix.os, 'macos') || matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          if startsWith("${{ matrix.os }}", 'macos'); then
+          if [[ "${{ matrix.os }}" == macos* ]]; then
             brew update
             # CMake と OpenJTalk/HTS/libsndfile を入れてソースビルドに備える
             brew install cmake libsndfile portaudio open-jtalk || true
