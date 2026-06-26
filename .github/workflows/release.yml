@@ -83,6 +83,14 @@ jobs:
               print("DEBUG: import check failed:", e)
           PY
 
+      - name: Set UTF-8 encoding (Windows only)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          chcp 65001
+          setx PYTHONUTF8 1
+
+
 
 
       # 2. OS依存ライブラリを入れる
