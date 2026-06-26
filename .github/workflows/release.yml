@@ -54,21 +54,35 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           QT_MEDIA_BACKEND: ffmpeg
         run: |
+          set -euo pipefail
+
+          # 基本の pip ツールを最新化
           python -m pip install --upgrade pip wheel setuptools
+
           # requirements を先に入れる（既存）
           python -m pip install -r requirements.txt || true
-          # PyInstaller のアイコン変換に必要な Pillow を確実に入れる
-          python -m pip install Pillow || true
 
-          # --- 安全策 A: 事前ビルド済みパッケージを優先して上書きインストール ---
+          # PyInstaller のアイコン変換に必要な Pillow と
+          # 起動に必要な GUI / オーディオ関連パッケージを確実に入れる
+          python -m pip install Pillow PySide6 sounddevice soundfile || true
+
           # macOS / Linux では pyopenjtalk のソースビルド回避のため prebuilt を使う
           if [[ "${{ matrix.os }}" == macos* ]] || [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             python -m pip install --upgrade pyopenjtalk-prebuilt || true
           fi
 
-          # python-rtmidi と mido を明示的に追加して Runner 環境に流し込む
-          python -m pip install "setuptools<82" pytest ruff pyright python-rtmidi mido || true
-          python -m pip install pyinstaller || true
+          # その他ツール類
+          python -m pip install "setuptools<82" pytest ruff pyright python-rtmidi mido pyinstaller || true
+
+          # デバッグ: インストール確認（CIログに出ます）
+          python - <<'PY' || true
+          try:
+              import PySide6, sounddevice, soundfile, PIL
+              print("DEBUG: PySide6, sounddevice, soundfile, Pillow OK")
+          except Exception as e:
+              print("DEBUG: import check failed:", e)
+          PY
+
 
 
       # 2. OS依存ライブラリを入れる
