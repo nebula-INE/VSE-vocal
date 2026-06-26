@@ -55,6 +55,8 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           # requirements を先に入れる（既存）
           python -m pip install -r requirements.txt || true
+          python -m pip install Pillow || true
+
 
           # --- 安全策 A: 事前ビルド済みパッケージを優先して上書きインストール ---
           # macOS / Linux では pyopenjtalk のソースビルド回避のため prebuilt を使う
