@@ -1,7 +1,6 @@
-
-pyopenjtalk
-numpy
-PySide6
+pyopenjtalk>=0.3.4,<0.4.0
+numpy>=1.24,<3.0
+PySide6>=6.6,<7.0
 setuptools>=70,<81
 pyinstaller==6.13.0
 backports.tarfile
