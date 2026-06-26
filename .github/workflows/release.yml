@@ -85,10 +85,11 @@ jobs:
 
       - name: Set UTF-8 encoding (Windows only)
         if: matrix.os == 'windows-latest'
-        shell: bash
+        shell: cmd
         run: |
           chcp 65001
           setx PYTHONUTF8 1
+
 
 
 
