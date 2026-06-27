@@ -528,6 +528,11 @@ jobs:
           echo "Cleaned Frameworks/ dir:"
           ls "${APP}/Contents/Frameworks/" | grep -v "^Qt\|^Py\|^lib\|^python\|^shiboken\|^bin\|^numpy\|^_sound\|^rtmidi\|^setuptools\|^mido\|^pyopen\|^pyside\|^soundd\|^assets\|^modules" || true
 
+      - name: Clean App Bundle Frameworks
+        run: |
+          rm -rf dist/VO-SE_vocal_Mac.app/Contents/Frameworks/*.dist-info
+          rm -rf dist/VO-SE_vocal_Mac.app/Contents/Frameworks/*.egg-info
+    
       - name: 🍎 Verify and Fix macOS Library Linkage (Complete & Final)
         if: startsWith(matrix.os, 'macos')
         shell: bash
