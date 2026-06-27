@@ -511,22 +511,6 @@ jobs:
           echo "== verify bundled vose core =="
           find dist -name "libvose_core.dylib" -type f
 
-      - name: "🧹 [Step 8.5] Fix macOS .app bundle (remove dist-info from Frameworks)"
-        if: startsWith(matrix.os, 'macos')
-        shell: bash
-        run: |
-          APP="dist/VO-SE_PRO_Mac.app"
-          # codesign が .dist-info を「壊れたバンドル」と判定するのを防ぐ
-          # Frameworks/ 直下の *.dist-info は署名不要なメタデータなので削除
-          find "${APP}/Contents/Frameworks" -maxdepth 1 \
-            -name "*.dist-info" -exec rm -rf {} +
-          
-          # Frameworks/ 直下の symlink の実コピーで残った .zip も安全のため除去
-          find "${APP}/Contents/Frameworks" -maxdepth 1 \
-            -name "base_library.zip" -delete 2>/dev/null || true
-          
-          echo "Cleaned Frameworks/ dir:"
-          ls "${APP}/Contents/Frameworks/" | grep -v "^Qt\|^Py\|^lib\|^python\|^shiboken\|^bin\|^numpy\|^_sound\|^rtmidi\|^setuptools\|^mido\|^pyopen\|^pyside\|^soundd\|^assets\|^modules" || true
 
       - name: Clean App Bundle Frameworks
         if: startsWith(matrix.os, 'macos')
