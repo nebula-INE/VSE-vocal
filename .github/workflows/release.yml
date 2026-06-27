@@ -512,7 +512,7 @@ jobs:
           find dist -name "libvose_core.dylib" -type f
 
       - name: "🧹 [Step 8.5] Fix macOS .app bundle (remove dist-info from Frameworks)"
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
           APP="dist/VO-SE_PRO_Mac.app"
@@ -529,6 +529,8 @@ jobs:
           ls "${APP}/Contents/Frameworks/" | grep -v "^Qt\|^Py\|^lib\|^python\|^shiboken\|^bin\|^numpy\|^_sound\|^rtmidi\|^setuptools\|^mido\|^pyopen\|^pyside\|^soundd\|^assets\|^modules" || true
 
       - name: Clean App Bundle Frameworks
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
         run: |
           rm -rf dist/VO-SE_vocal_Mac.app/Contents/Frameworks/*.dist-info
           rm -rf dist/VO-SE_vocal_Mac.app/Contents/Frameworks/*.egg-info
