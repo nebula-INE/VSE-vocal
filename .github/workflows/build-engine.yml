@@ -50,9 +50,36 @@ jobs:
         run: brew install portaudio libsndfile
 
       - name: "📦 [Step 4] Install Python Dependencies"
+        shell: bash
         run: |
-          python -m pip install --upgrade pip wheel
+          set -euo pipefail
+
+          python -m pip install --upgrade pip wheel setuptools
+
+          # --- 事前ビルド版を先に入れて pyopenjtalk のソースビルドを回避 ---
+          # macOS / Linux 両方で有効。Windows でも問題なければ同様に入れてOK。
+          python -m pip install --upgrade pyopenjtalk-prebuilt || true
+
+          # requirements をインストール（prebuilt があればそちらが優先されます）
           python -m pip install -r requirements.txt
+
+          # 必要ランタイム（任意で追加）
+          python -m pip install Pillow PySide6 sounddevice soundfile || true
+
+          # デバッグ出力
+          python - <<'PY' || true
+          import importlib, sys, subprocess
+          def show(pkg):
+              try:
+                  m = importlib.import_module(pkg)
+                  print(f"OK: {pkg} ->", getattr(m, "__version__", "version-unknown"))
+              except Exception as e:
+                  print(f"MISS: {pkg} -> {e}")
+          for p in ("pyopenjtalk","pyopenjtalk_prebuilt","cmake"):
+              show(p)
+          subprocess.run(["cmake","--version"], check=False)
+          PY
+
 
       - name: "📂 [Step 5] Prepare Directory"
         shell: bash
