@@ -10,11 +10,17 @@ import threading
 import importlib
 from importlib.util import find_spec
 
+from typing import Any
+
 if sys.platform.startswith("win"):
     try:
-        # Python 3.7+ の reconfigure を使う（推奨）
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
+        # 静的解析を回避するため一旦 Any にキャストしてから hasattr で確認して呼ぶ
+        _out: Any = sys.stdout
+        _err: Any = sys.stderr
+        if hasattr(_out, "reconfigure"):
+            _out.reconfigure(encoding="utf-8")
+        if hasattr(_err, "reconfigure"):
+            _err.reconfigure(encoding="utf-8")
     except Exception:
         # reconfigure が無い環境や埋め込み環境向けのフォールバック
         import os as _os
