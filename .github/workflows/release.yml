@@ -465,13 +465,11 @@ jobs:
               MAC_LABEL="AppleSilicon"
             fi
 
-            # macOS は .app バンドル作成時は onedir を推奨
+            # macOS は onedir を推奨。PySide6 の不要モジュールを明示的に除外して symlink 衝突を防ぐ
             pyinstaller --noconsole --windowed --clean --onedir \
               --target-arch "$MAC_ARCH" \
               --paths modules \
               --icon="assets/icon.icns" \
-              --exclude-module PySide6.QtPdf \
-              --collect-all=PySide6 \
               --hidden-import=modules.gui.main_window \
               --hidden-import=rtmidi \
               --hidden-import=mido.backends.rtmidi \
@@ -483,11 +481,68 @@ jobs:
               --add-data "bin/libvose_core.dylib:bin" \
               --add-data "assets:assets" \
               --add-data "modules:modules" \
+              --exclude-module PySide6.Qt3DAnimation \
+              --exclude-module PySide6.Qt3DCore \
+              --exclude-module PySide6.Qt3DExtras \
+              --exclude-module PySide6.Qt3DInput \
+              --exclude-module PySide6.Qt3DLogic \
+              --exclude-module PySide6.Qt3DRender \
+              --exclude-module PySide6.QtCharts \
+              --exclude-module PySide6.QtDataVisualization \
+              --exclude-module PySide6.QtDesigner \
+              --exclude-module PySide6.QtGraphs \
+              --exclude-module PySide6.QtHelp \
+              --exclude-module PySide6.QtLocation \
+              --exclude-module PySide6.QtNfc \
+              --exclude-module PySide6.QtPdf \
+              --exclude-module PySide6.QtPdfWidgets \
+              --exclude-module PySide6.QtPositioning \
+              --exclude-module PySide6.QtQuick3D \
+              --exclude-module PySide6.QtQuickControls2 \
+              --exclude-module PySide6.QtRemoteObjects \
+              --exclude-module PySide6.QtScxml \
+              --exclude-module PySide6.QtSensors \
+              --exclude-module PySide6.QtSerialBus \
+              --exclude-module PySide6.QtSerialPort \
+              --exclude-module PySide6.QtSpatialAudio \
+              --exclude-module PySide6.QtWebEngineCore \
+              --exclude-module PySide6.QtWebEngineQuick \
+              --exclude-module PySide6.QtWebEngineWidgets \
+              --exclude-module PySide6.QtWebSockets \
+              --exclude-module PySide6.QtWebView \
               --name "VO-SE_vocal_Mac" main.py
-            chmod +x dist/VO-SE_vocal_Mac.app/Contents/MacOS/VO-SE_vocal_Mac
+
+            # 実行ビット付与（onedir の場合の実行ファイル）
+            chmod +x dist/VO-SE_vocal_Mac.app/Contents/MacOS/VO-SE_vocal_Mac || true
 
             echo "macOS app bundle is ready for signing before packaging."
           fi
+
+      - name: 🧹 Clean PySide6 Frameworks (macOS only)
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          APP="dist/VO-SE_vocal_Mac.app"
+          if [ -d "$APP" ]; then
+            echo "Cleaning PySide6/Qt extras from $APP"
+            rm -rf "$APP/Contents/Frameworks/PySide6/Assistant.app" || true
+            rm -rf "$APP/Contents/Frameworks/PySide6/Designer.app" || true
+            rm -rf "$APP/Contents/Frameworks/Qt/libexec" || true
+            rm -rf "$APP/Contents/Frameworks/Qt/examples" || true
+            rm -rf "$APP/Contents/Frameworks/Qt/tests" || true
+            # 不要なプラグイン（必要に応じて追加/削除）
+            rm -rf "$APP/Contents/Frameworks/Qt/plugins/printsupport" || true
+            rm -rf "$APP/Contents/Frameworks/Qt/plugins/sqldrivers" || true
+            rm -rf "$APP/Contents/Frameworks/Qt/plugins/virtualkeyboard" || true
+            # Python メタデータ
+            find "$APP/Contents/Frameworks" -maxdepth 2 -name "*.dist-info" -exec rm -rf {} + || true
+            find "$APP/Contents/Frameworks" -maxdepth 2 -name "*.egg-info" -exec rm -rf {} + || true
+            echo "Cleanup done."
+          else
+            echo "No app bundle found at $APP; skipping cleanup."
+          fi
+
+
 
       - name: Verify macOS binary linkage
         if: startsWith(matrix.os, 'macos')
