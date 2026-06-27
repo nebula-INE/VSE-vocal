@@ -517,10 +517,47 @@ jobs:
         run: |
           set -euo pipefail
 
+          # 0. シンボリックリンクを実体に置き換える（codesign エラー対策）
+          APP_BUNDLE="dist/VO-SE_vocal_Mac.app"
+          if [ -d "$APP_BUNDLE" ]; then
+            echo "== Resolving symlinks inside app bundle =="
+            find "$APP_BUNDLE" -type l -print > /tmp/symlinks.txt || true
+
+            if [ -s /tmp/symlinks.txt ]; then
+              cat /tmp/symlinks.txt
+              while IFS= read -r link; do
+                [ -e "$link" ] || continue
+                target=$(readlink "$link")
+                if [ "${target#/}" = "$target" ]; then
+                  target="$(dirname "$link")/$target"
+                fi
+                echo "Resolving: $link -> $target"
+                tmp="${link}.tmp"
+                mkdir -p "$(dirname "$link")"
+                if [ -d "$target" ]; then
+                  cp -R -L "$target" "$tmp"
+                else
+                  cp -L "$target" "$tmp"
+                fi
+                rm -f "$link"
+                mv "$tmp" "$link"
+                echo "Replaced symlink with real copy: $link"
+              done < /tmp/symlinks.txt
+            else
+              echo "No symlinks found in $APP_BUNDLE"
+            fi
+
+            # 任意: 不要な PySide6 の Assistant.app を削除してネスト .app 問題を避ける
+            PY_SIDE_ASSISTANT="$APP_BUNDLE/Contents/Frameworks/PySide6/Assistant__dot__app"
+            if [ -d "$PY_SIDE_ASSISTANT" ]; then
+              echo "Removing PySide6 Assistant.app (nested app not needed)"
+              rm -rf "$PY_SIDE_ASSISTANT"
+            fi
+          fi
+
           # 1. アプリケーションの実行バイナリを確実に特定する（.app形式とonedir形式の両方に対応）
           APP_BIN=$(find dist -type f -name "VO-SE_vocal_Mac" | grep -E "\.app/Contents/MacOS/" | head -n 1)
           if [ -z "$APP_BIN" ]; then
-            # .app が見つからない場合は通常のバイナリを検索
             APP_BIN=$(find dist -type f -name "VO-SE_vocal_Mac" | head -n 1)
           fi
 
@@ -536,18 +573,12 @@ jobs:
             echo "Processing dylib: $DYLIB_BIN"
             chmod 755 "$DYLIB_BIN"
             LIB_NAME=$(basename "$DYLIB_BIN")
-            
-            # 自身のIDを確定
             install_name_tool -id "@loader_path/$LIB_NAME" "$DYLIB_BIN"
-            
-            # アプリ本体側が持っている古い参照パスを取得
             OLD_REF=$(otool -L "$APP_BIN" | grep "libvose_core" | awk '{print $1}' || true)
             if [ -n "$OLD_REF" ]; then
               echo "Changing reference in app from $OLD_REF to @executable_path/../Frameworks/bin/$LIB_NAME"
               install_name_tool -change "$OLD_REF" "@executable_path/../Frameworks/bin/$LIB_NAME" "$APP_BIN" || true
             fi
-            
-            # パス変更によって壊れた署名を一度アドホック署名で直す
             codesign --force --sign - "$DYLIB_BIN"
           done
 
@@ -557,9 +588,9 @@ jobs:
             echo "Signing app bundle: $APP_BUNDLE"
             # 内部の個別ファイルをすべてアドホック署名
             find "$APP_BUNDLE" -type f \( -name "*.dylib" -o -name "*.so" -o -name "VO-SE_vocal_Mac" \) -exec codesign --force --options runtime --sign - {} \;
-            # 最後に .app 自体を署名（これが正しいネスト署名の順番です）
+            # 最後に .app 自体を署名
             codesign --force --deep --options runtime --entitlements macos-entitlements.plist --sign - "$APP_BUNDLE"
-            
+
             echo "Verifying signature..."
             codesign --verify --deep --strict "$APP_BUNDLE"
             spctl --assess --type execute "$APP_BUNDLE" || true
@@ -568,6 +599,7 @@ jobs:
             find dist -type f \( -name "*.dylib" -o -name "*.so" -o -name "VO-SE_vocal_Mac" \) -exec codesign --force --sign - {} \;
           fi
           echo "✅ macOS Linkage & Code Signing completed successfully!"
+
 
       
       - name: Smoke test packaged app startup
