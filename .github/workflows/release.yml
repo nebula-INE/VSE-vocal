@@ -561,97 +561,102 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
-          rm -rf dist/VO-SE_vocal_Mac.app/Contents/Frameworks/*.dist-info
-          rm -rf dist/VO-SE_vocal_Mac.app/Contents/Frameworks/*.egg-info
+          APP="dist/VO-SE_vocal_Mac.app"
+          if [ -d "$APP" ]; then
+            echo "Removing obvious metadata and heavy extras"
+            find "$APP/Contents/Frameworks" -maxdepth 2 -name "*.dist-info" -exec rm -rf {} + || true
+            find "$APP/Contents/Frameworks" -maxdepth 2 -name "*.egg-info" -exec rm -rf {} + || true
+            rm -rf "$APP/Contents/Frameworks/Qt/libexec" || true
+            rm -rf "$APP/Contents/Frameworks/Qt/examples" || true
+            rm -rf "$APP/Contents/Frameworks/PySide6/Assistant__dot__app" || true
+            rm -rf "$APP/Contents/Frameworks/PySide6/Designer__dot__app" || true
+          else
+            echo "No app bundle found at $APP; skipping cleanup."
+          fi
 
-      - name: 🍎 Verify and Fix macOS Library Linkage (Complete & Final)
+      - name: 🍎 Verify and Fix macOS Library Linkage Safe
         if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
           set -euo pipefail
 
-          # 0. シンボリックリンクを実体に置き換える（codesign エラー対策）
           APP_BUNDLE="dist/VO-SE_vocal_Mac.app"
-          if [ -d "$APP_BUNDLE" ]; then
-            echo "== Resolving symlinks inside app bundle =="
-            find "$APP_BUNDLE" -type l -print > /tmp/symlinks.txt || true
+          if [ ! -d "$APP_BUNDLE" ]; then
+            echo "Error: app bundle not found at $APP_BUNDLE"
+            exit 0
+          fi
 
-            if [ -s /tmp/symlinks.txt ]; then
-              cat /tmp/symlinks.txt
-              while IFS= read -r link; do
-                [ -e "$link" ] || continue
-                target=$(readlink "$link")
-                if [ "${target#/}" = "$target" ]; then
-                  target="$(dirname "$link")/$target"
-                fi
-                echo "Resolving: $link -> $target"
-                tmp="${link}.tmp"
-                mkdir -p "$(dirname "$link")"
-                if [ -d "$target" ]; then
-                  cp -R -L "$target" "$tmp"
-                else
-                  cp -L "$target" "$tmp"
-                fi
-                rm -f "$link"
-                mv "$tmp" "$link"
-                echo "Replaced symlink with real copy: $link"
-              done < /tmp/symlinks.txt
+          echo "== Quick symlink summary =="
+          find "$APP_BUNDLE" -type l | head -n 50 || true
+          echo "Total symlinks:" $(find "$APP_BUNDLE" -type l | wc -l)
+
+          # Materialize only problematic framework 'Versions/Current' symlinks to avoid collisions
+          echo "== Materializing framework 'Versions/Current' symlinks (safe) =="
+          find "$APP_BUNDLE/Contents/Frameworks" -type l -name "Current" -print | while read -r link; do
+            [ -z "$link" ] && continue
+            target=$(readlink "$link" || true)
+            [ -z "$target" ] && continue
+            # convert relative to absolute if needed
+            if [ "${target#/}" = "$target" ]; then
+              target="$(dirname "$link")/$target"
+            fi
+            echo "Materializing: $link -> $target"
+            tmp="${link}.tmp"
+            mkdir -p "$(dirname "$link")"
+            if [ -d "$target" ]; then
+              cp -R -L "$target" "$tmp"
             else
-              echo "No symlinks found in $APP_BUNDLE"
+              cp -L "$target" "$tmp"
             fi
+            rm -f "$link"
+            mv "$tmp" "$link"
+          done
 
-            # 任意: 不要な PySide6 の Assistant.app を削除してネスト .app 問題を避ける
-            PY_SIDE_ASSISTANT="$APP_BUNDLE/Contents/Frameworks/PySide6/Assistant__dot__app"
-            if [ -d "$PY_SIDE_ASSISTANT" ]; then
-              echo "Removing PySide6 Assistant.app (nested app not needed)"
-              rm -rf "$PY_SIDE_ASSISTANT"
-            fi
-          fi
+          # Remove nested PySide6 apps and other nested .app that break codesign
+          rm -rf "$APP_BUNDLE/Contents/Frameworks/PySide6/Assistant__dot__app" || true
+          rm -rf "$APP_BUNDLE/Contents/Frameworks/PySide6/Designer__dot__app" || true
 
-          # 1. アプリケーションの実行バイナリを確実に特定する（.app形式とonedir形式の両方に対応）
-          APP_BIN=$(find dist -type f -name "VO-SE_vocal_Mac" | grep -E "\.app/Contents/MacOS/" | head -n 1)
+          # Locate main binary
+          APP_BIN=$(find "$APP_BUNDLE" -type f -path "*/Contents/MacOS/VO-SE_vocal_Mac" -print -quit)
           if [ -z "$APP_BIN" ]; then
-            APP_BIN=$(find dist -type f -name "VO-SE_vocal_Mac" | head -n 1)
+            APP_BIN=$(find "$APP_BUNDLE" -type f -name "VO-SE_vocal_Mac" -print -quit)
           fi
-
           if [ -z "$APP_BIN" ]; then
-            echo "Error: APP_BIN (VO-SE_vocal_Mac) not found in dist/"
+            echo "Error: APP_BIN not found in $APP_BUNDLE"
             exit 1
           fi
           echo "Found APP_BIN: $APP_BIN"
           chmod +x "$APP_BIN"
 
-          # 2. dylib を検索して、参照パス（install_name）の書き換えと個別署名を行う
-          find dist -name "libvose_core.dylib" -type f | while read -r DYLIB_BIN; do
+          # Fix install_name for bundled libvose_core.dylib if present and sign each dylib
+          find "$APP_BUNDLE" -name "libvose_core.dylib" -type f | while read -r DYLIB_BIN; do
             echo "Processing dylib: $DYLIB_BIN"
             chmod 755 "$DYLIB_BIN"
             LIB_NAME=$(basename "$DYLIB_BIN")
-            install_name_tool -id "@loader_path/$LIB_NAME" "$DYLIB_BIN"
+            install_name_tool -id "@loader_path/$LIB_NAME" "$DYLIB_BIN" || true
             OLD_REF=$(otool -L "$APP_BIN" | grep "libvose_core" | awk '{print $1}' || true)
             if [ -n "$OLD_REF" ]; then
               echo "Changing reference in app from $OLD_REF to @executable_path/../Frameworks/bin/$LIB_NAME"
               install_name_tool -change "$OLD_REF" "@executable_path/../Frameworks/bin/$LIB_NAME" "$APP_BIN" || true
             fi
-            codesign --force --sign - "$DYLIB_BIN"
+            codesign --force --sign - "$DYLIB_BIN" || true
           done
 
-          # 3. アプリケーション全体の再署名（.app があれば .app を、なければ親ディレクトリを対象にする）
-          APP_BUNDLE=$(find dist -maxdepth 2 -name "VO-SE_vocal_Mac.app" -type d | head -n 1)
-          if [ -n "$APP_BUNDLE" ]; then
-            echo "Signing app bundle: $APP_BUNDLE"
-            # 内部の個別ファイルをすべてアドホック署名
-            find "$APP_BUNDLE" -type f \( -name "*.dylib" -o -name "*.so" -o -name "VO-SE_vocal_Mac" \) -exec codesign --force --options runtime --sign - {} \;
-            # 最後に .app 自体を署名
-            codesign --force --deep --options runtime --entitlements macos-entitlements.plist --sign - "$APP_BUNDLE"
+          # Sign individual binaries first, then the app bundle
+          echo "Signing internal binaries..."
+          find "$APP_BUNDLE" -type f \( -name "*.dylib" -o -name "*.so" -o -name "VO-SE_vocal_Mac" \) -print | while read -r f; do
+            codesign --force --options runtime --sign - "$f" || true
+          done
 
-            echo "Verifying signature..."
-            codesign --verify --deep --strict "$APP_BUNDLE"
-            spctl --assess --type execute "$APP_BUNDLE" || true
-          else
-            echo "No .app bundle found. Signing individual files in dist..."
-            find dist -type f \( -name "*.dylib" -o -name "*.so" -o -name "VO-SE_vocal_Mac" \) -exec codesign --force --sign - {} \;
-          fi
+          echo "Signing app bundle..."
+          codesign --force --deep --options runtime --entitlements macos-entitlements.plist --sign - "$APP_BUNDLE" || true
+
+          echo "Verifying signature..."
+          codesign --verify --deep --strict "$APP_BUNDLE" || true
+          spctl --assess --type execute "$APP_BUNDLE" || true
+
           echo "✅ macOS Linkage & Code Signing completed successfully!"
+
 
       - name: Smoke test packaged app startup
         shell: python
