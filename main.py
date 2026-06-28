@@ -453,6 +453,9 @@ def main():
 
     try:
         window = MainWindow()
+        # app_main.py の MainWindow 生成直後
+        from modules.gui.main_window_patch import patch_main_window
+        patch_main_window(window)
     except Exception as e:
         QMessageBox.critical(None, "起動エラー", f"メイン画面の初期化でエラーが発生しました。\n{e}")
         if hasattr(sys, "stderr"):
