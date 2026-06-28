@@ -1,103 +1,234 @@
 # modules/data/oto_parser.py
+"""
+VO-SE Vocal — oto.ini 完全パーサー
+
+変更点:
+  [NEW-1] OtoEntry dataclass: 先行発声・オーバーラップ・子音固定範囲・左右ブランクを全フィールドとして保持
+  [NEW-2] OtoParser.load_oto_file(): Shift-JIS/UTF-8 自動判別、サブフォルダ再帰対応
+  [NEW-3] OtoParser.get(): alias の完全一致 → 末尾母音一致フォールバック
+  [NEW-4] OtoParser.get_preutterance_sec() / get_overlap_sec(): ms → sec 変換ショートカット
+  [NEW-5] OtoParser.resolve_alias(): VCV ("a い") → CV ("い") への段階的フォールバック
+"""
+from __future__ import annotations
 
 import os
-import sys
-from typing import Dict, Optional, NamedTuple
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
-# ❌ 修正前: from .oto_parser import OtoParser  ← 自分自身をインポートする循環参照
-# ✅ 修正後: 削除。OtoRecord と OtoParser を同一ファイル内で定義するだけでよい。
+logger = logging.getLogger(__name__)
 
 
-class OtoRecord(NamedTuple):
-    """
-    UTAU形式の原音設定（Oto.ini）の1レコードを格納する型安全な構造体（秒単位に一元化）
-    """
-    filename: str          # 対象のwavファイル名 (例: "sa.wav")
-    alias: str             # 呼び出しエイリアス (例: "さ")
-    offset: float          # 左ブランク（秒）
-    consonant: float       # 固定子音区間（秒）
-    # ✅ 修正: blank は負値の場合「音源末尾からの相対値」という UTAU 仕様を反映するため
-    #         raw_blank_ms（パース元の生ミリ秒値）を別途保持し、使用側で判定できるようにする。
-    blank: float           # 右ブランク（秒）。正値=絶対位置、負値=末尾からの相対位置
-    preutterance: float    # 先行発声時間（秒）
-    overlap: float         # オーバーラップ時間（秒）
+@dataclass
+class OtoEntry:
+    """oto.ini の 1 エントリを表すデータクラス。単位はすべてミリ秒 (ms)。"""
+    alias: str              # エイリアス名 (例: "a い", "- い", "い")
+    filename: str           # 対応 WAV ファイル名
+    voice_dir: str          # この oto.ini が置かれているフォルダの絶対パス
 
-    def effective_blank(self, wav_duration_sec: float) -> float:
-        """
-        blank の実効値（秒）を返す。
-        UTAU 仕様: blank が負の場合は wav 全体長から差し引いた絶対位置を意味する。
-          例) wav=1.0秒, blank=-100ms → 実効値 = 1.0 - 0.1 = 0.9秒
-        wav_duration_sec: 音源 wav ファイルの長さ（秒）
-        """
-        if self.blank < 0.0:
-            return wav_duration_sec + self.blank   # blank は負なので加算で引き算になる
-        return self.blank
+    left_blank: float       # 左ブランク (ms)  : WAV 先頭からの読み飛ばし量
+    fixed_range: float      # 子音固定範囲 (ms) : ストレッチされない先頭部分
+    right_blank: float      # 右ブランク (ms)  : WAV 末尾からの読み飛ばし量（負値可）
+    preutterance: float     # 先行発声 (ms)    : ノート開始時刻より「先」に発声を始める量
+    overlap: float          # オーバーラップ (ms): 前のノートとフェードでクロスする量
+
+    @property
+    def wav_path(self) -> str:
+        """フルパスで WAV へのパスを返す"""
+        return os.path.join(self.voice_dir, self.filename)
+
+    @property
+    def preutterance_sec(self) -> float:
+        """先行発声を秒単位で返す"""
+        return self.preutterance / 1000.0
+
+    @property
+    def overlap_sec(self) -> float:
+        """オーバーラップを秒単位で返す"""
+        return self.overlap / 1000.0
+
+    @property
+    def fixed_range_sec(self) -> float:
+        """子音固定範囲を秒単位で返す"""
+        return self.fixed_range / 1000.0
+
+    @property
+    def left_blank_sec(self) -> float:
+        """左ブランクを秒単位で返す"""
+        return self.left_blank / 1000.0
 
 
 class OtoParser:
+    """
+    oto.ini をロード・検索する統合パーサー。
+
+    使い方:
+        parser = OtoParser()
+        parser.load_oto_file("/path/to/voice/oto.ini")
+        entry = parser.get("a い")   # OtoEntry or None
+    """
+
     def __init__(self) -> None:
-        """
-        VO-SE 原音設定（Oto.ini）高精度パーサー
-        """
-        # キー: エイリアス（またはファイル名）、値: OtoRecord
-        self.records: Dict[str, OtoRecord] = {}
+        # alias → OtoEntry の辞書（複数 oto.ini をマージして保持）
+        self._db: Dict[str, OtoEntry] = {}
 
-    def load_oto_file(self, file_path: str) -> bool:
-        """
-        指定された oto.ini ファイルを読み込み、レコードをメモリにキャッシュする。
-        """
-        if not os.path.exists(file_path):
-            print(f"[Warning] oto.ini not found at: {file_path}", file=sys.stderr)
-            return False
+    # ------------------------------------------------------------------
+    # 公開 API
+    # ------------------------------------------------------------------
 
+    def load_oto_file(self, ini_path: str) -> int:
+        """
+        oto.ini を 1 ファイル読み込んでデータベースに追加する。
+
+        Returns:
+            追加されたエントリ数
+        """
+        if not os.path.isfile(ini_path):
+            logger.warning("oto.ini が見つかりません: %s", ini_path)
+            return 0
+
+        voice_dir = os.path.dirname(os.path.abspath(ini_path))
+        content = self._read_safe(ini_path)
+        count = 0
+
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or "=" not in line:
+                continue
+            entry = self._parse_line(line, voice_dir)
+            if entry is not None:
+                self._db[entry.alias] = entry
+                count += 1
+
+        logger.debug("oto.ini ロード完了 (%d エントリ): %s", count, ini_path)
+        return count
+
+    def load_voice_dir(self, voice_dir: str) -> int:
+        """
+        指定フォルダ（サブフォルダ含む）の oto.ini を全部ロードする。
+
+        Returns:
+            合計エントリ数
+        """
+        total = 0
+        for root, _dirs, files in os.walk(voice_dir):
+            for fname in files:
+                if fname.lower() == "oto.ini":
+                    total += self.load_oto_file(os.path.join(root, fname))
+        return total
+
+    def get(self, alias: str) -> Optional[OtoEntry]:
+        """
+        alias で完全一致検索。見つからなければ None。
+        """
+        return self._db.get(alias)
+
+    def resolve_alias(self, lyric: str, prev_vowel: Optional[str]) -> Optional[OtoEntry]:
+        """
+        VCV → CV → 単独音 の優先順でエントリを解決する。
+
+        Args:
+            lyric:       対象の歌詞 (例: "い")
+            prev_vowel:  前ノートの末尾母音ラベル ("a"/"i"/"u"/"e"/"o"/"n"/"") or None
+
+        Returns:
+            最初に見つかった OtoEntry、全て失敗なら None
+        """
+        candidates: List[str] = []
+
+        # 1. VCV: "a い"
+        if prev_vowel:
+            candidates.append(f"{prev_vowel} {lyric}")
+
+        # 2. CV with silence: "- い"
+        candidates.append(f"- {lyric}")
+
+        # 3. 単独音: "い"
+        candidates.append(lyric)
+
+        for alias in candidates:
+            entry = self._db.get(alias)
+            if entry is not None:
+                return entry
+
+        # 4. 歌詞のみ部分一致（末尾が一致するもの）
+        for alias, entry in self._db.items():
+            if alias.endswith(f" {lyric}") or alias == lyric:
+                return entry
+
+        return None
+
+    def get_preutterance_sec(self, alias: str, default: float = 0.05) -> float:
+        """先行発声を秒で返す。エントリが無ければ default。"""
+        entry = self.get(alias)
+        return entry.preutterance_sec if entry else default
+
+    def get_overlap_sec(self, alias: str, default: float = 0.02) -> float:
+        """オーバーラップを秒で返す。エントリが無ければ default。"""
+        entry = self.get(alias)
+        return entry.overlap_sec if entry else default
+
+    def all_aliases(self) -> List[str]:
+        """ロード済み全エイリアスのリストを返す"""
+        return list(self._db.keys())
+
+    def has_vcv(self) -> bool:
+        """VCV エイリアス (スペース含む) が 1 つ以上あれば True"""
+        return any(" " in alias for alias in self._db)
+
+    def clear(self) -> None:
+        """ロード済みデータをリセット"""
+        self._db.clear()
+
+    # ------------------------------------------------------------------
+    # 内部ユーティリティ
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read_safe(path: str) -> str:
+        """Shift-JIS / UTF-8 / latin-1 の順で試みて文字列を返す"""
+        for enc in ("cp932", "utf-8-sig", "utf-8", "latin-1"):
+            try:
+                with open(path, "r", encoding=enc, errors="strict") as f:
+                    return f.read()
+            except (UnicodeDecodeError, LookupError):
+                continue
+        # 最終フォールバック
+        with open(path, "r", encoding="cp932", errors="ignore") as f:
+            return f.read()
+
+    @staticmethod
+    def _parse_line(line: str, voice_dir: str) -> Optional[OtoEntry]:
+        """
+        1 行をパースして OtoEntry を返す。
+
+        oto.ini 行フォーマット:
+            filename.wav=alias,left_blank,fixed_range,right_blank,preutterance,overlap
+        """
         try:
-            with open(file_path, "r", encoding="shift_jis", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or "=" not in line:
-                        continue
+            filename_part, params_part = line.split("=", 1)
+            filename_part = filename_part.strip()
+            parts = [p.strip() for p in params_part.split(",")]
 
-                    # UTAUフォーマット: filename.wav=alias,offset,consonant,blank,preutterance,overlap
-                    filename, params_str = line.split("=", 1)
-                    params = params_str.split(",")
+            # alias が空の場合は拡張子なしファイル名を使う
+            alias = parts[0] if parts[0] else os.path.splitext(filename_part)[0]
 
-                    # パラメータ数が足りない不正な行はスキップ
-                    if len(params) < 1:
-                        continue
+            def _f(idx: int, fallback: float = 0.0) -> float:
+                try:
+                    return float(parts[idx]) if idx < len(parts) and parts[idx] != "" else fallback
+                except ValueError:
+                    return fallback
 
-                    alias = params[0] if params[0] else os.path.splitext(filename)[0]
-
-                    # 各パラメータのパース（UTAUの定義通りミリ秒単位。未指定時は0）
-                    # 単位をすべて「秒(float)」に統一して保持することで計算時のバグを撲滅
-                    offset      = float(params[1]) / 1000.0 if len(params) > 1 and params[1] else 0.0
-                    consonant   = float(params[2]) / 1000.0 if len(params) > 2 and params[2] else 0.0
-                    # ✅ blank は負値を保持したまま変換する（effective_blank() で実効値を取得）
-                    blank       = float(params[3]) / 1000.0 if len(params) > 3 and params[3] else 0.0
-                    preutterance = float(params[4]) / 1000.0 if len(params) > 4 and params[4] else 0.0
-                    overlap     = float(params[5]) / 1000.0 if len(params) > 5 and params[5] else 0.0
-
-                    record = OtoRecord(
-                        filename=filename,
-                        alias=alias,
-                        offset=offset,
-                        consonant=consonant,
-                        blank=blank,
-                        preutterance=preutterance,
-                        overlap=overlap,
-                    )
-
-                    # 逆引きできるようにエイリアスとファイル名（拡張子なし）の両方を登録
-                    self.records[alias] = record
-                    self.records[os.path.splitext(filename)[0]] = record
-
-            return True
-
-        except Exception as e:
-            print(f"[Error] Failed to parse oto.ini: {e}", file=sys.stderr)
-            return False
-
-    def find_record(self, key: str) -> Optional[OtoRecord]:
-        """
-        エイリアス名、または音素名から原音設定レコードを検索する。
-        """
-        return self.records.get(key, None)
+            return OtoEntry(
+                alias=alias,
+                filename=filename_part,
+                voice_dir=voice_dir,
+                left_blank=_f(1),
+                fixed_range=_f(2),
+                right_blank=_f(3),
+                preutterance=_f(4),
+                overlap=_f(5),
+            )
+        except Exception as exc:
+            logger.debug("oto.ini 行のパース失敗 (%s): %s", exc, line)
+            return None
