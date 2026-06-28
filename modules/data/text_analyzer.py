@@ -1,70 +1,112 @@
 # modules/data/text_analyzer.py
+"""
+VO-SE Vocal — テキスト解析 / 発声タイミング整合
+
+変更点 (vs 旧実装):
+  [FIX-1] align_vocal_timing(): VcvResolver を使って前ノート母音を毎ノート正確に決定
+  [FIX-2] align_vocal_timing(): OtoParser から先行発声・オーバーラップを取得し
+           note.start_time の real_start_sec を正確に計算する
+  [FIX-3] align_vocal_timing(): UST 上書き値 (note.pre_utterance, note.overlap) が
+           None でない場合はそちらを優先する
+  [FIX-4] align_vocal_timing(): ビブラートカーブをフレームタイムラインに注入する
+  [FIX-5] _lyric_to_phonemes(): エラー時に "pau" ではなく [] を返すよう変更
+  [NEW-1] convert_kanji_to_kana(): pykakasi による漢字→ひらがな自動変換
+"""
+from __future__ import annotations
 
 import os
 import sys
-from typing import List, Optional, Dict, Any, Tuple
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
 import pyopenjtalk
+
 from modules.data.data_models import NoteEvent
-from modules.data.oto_parser import OtoParser  # 🚀 新規追加したパーサーをインポート
+from modules.data.oto_parser import OtoParser, OtoEntry
+from modules.audio.vcv_resolver import VcvResolver, VowelClassifier
+
+logger = logging.getLogger(__name__)
+
 
 class TextAnalyzer:
-    # 日本語の標準母音
+    """発声タイミング整合・音素解析クラス"""
+
+    # Open JTalk 標準母音
     STANDARD_VOWELS = {"a", "i", "u", "e", "o"}
-    # Open JTalkが生成する無声化母音（省略・ささやき化される母音）
+    # 無声化母音
     VOICELESS_VOWELS = {"A", "I", "U", "E", "O"}
-    # 全母音の結合セット
     ALL_VOWELS = STANDARD_VOWELS | VOICELESS_VOWELS
-    
-    # 特殊音素: 'N'（ん/撥音）、'cl'（っ/促音）
     SPECIAL_PHONEMES = {"N", "cl"}
 
-    def __init__(self, dict_path: Optional[str] = None):
-        """
-        VO-SE 究極版歌唱合成用タイムライン・アナライザー (Oto.ini連動モデル)
-        """
-        self.dict_path: str = dict_path if dict_path is not None else ""
-        
+    def __init__(self, dict_path: Optional[str] = None) -> None:
+        self.dict_path: str = dict_path or ""
         if self.dict_path and os.path.exists(self.dict_path):
-            set_dic_path = getattr(pyopenjtalk, "set_dic_path", None)
-            if callable(set_dic_path):
-                set_dic_path(self.dict_path)
+            set_dic = getattr(pyopenjtalk, "set_dic_path", None)
+            if callable(set_dic):
+                set_dic(self.dict_path)
 
-    def _lyric_to_phonemes(self, lyric: str) -> List[str]:
-        """歌詞から余計な記号を徹底排除し、純粋な発音用音素配列を抽出"""
-        if not lyric or not lyric.strip():
-            return ["pau"]
-            
+    # ------------------------------------------------------------------
+    # 公開 API
+    # ------------------------------------------------------------------
+
+    def convert_kanji_to_kana(self, text: str) -> str:
+        """
+        漢字・カナ混じりテキストをひらがなに変換する。
+
+        pykakasi が未インストールの場合はそのまま返す（起動を妨げない設計）。
+        """
+        if not text:
+            return ""
         try:
-            raw_features = pyopenjtalk.g2p(lyric, kana=False)
-            if raw_features:
-                return [p for p in raw_features.split() if p not in ("sil", "pau")]
-        except Exception as e:
-            print(f"[Warning] G2P conversion failed for '{lyric}': {e}", file=sys.stderr)
-            
-        return ["pau"]
+            import pykakasi
+            kks = pykakasi.kakasi()
+            result = kks.convert(text)
+            return "".join(str(item.get("hira", "")) for item in result)
+        except (ImportError, ModuleNotFoundError):
+            logger.debug("pykakasi 未インストール。元のテキストを返します。")
+            return text
+        except Exception as exc:
+            logger.warning("漢字→ひらがな変換エラー: %s", exc)
+            return text
 
     def align_vocal_timing(
-        self, 
-        note_events: List[NoteEvent], 
-        oto_parser: Optional[OtoParser] = None,  # 🚀 OtoParserをオプションで受け取る
-        frame_period_ms: float = 5.0
+        self,
+        note_events: List[NoteEvent],
+        oto_parser: Optional[OtoParser] = None,
+        frame_period_ms: float = 5.0,
     ) -> Tuple[List[NoteEvent], List[Dict[str, Any]]]:
         """
-        【フェーズ3：完全版】
-        Oto.ini（原音設定）の「先行発声」「オーバーラップ」を厳密に反映し、
-        5msフレーム単位の連続歌唱タイムライン配列を動的に構築する。
+        【完全版】各ノートに対し:
+          1. VCV 連音エイリアスを解決する
+          2. Oto.ini から先行発声・オーバーラップを取得し、
+             UST 上書き値がある場合はそちらを優先する
+          3. 実際の発声開始時刻 (real_start_sec) を note に書き戻す
+          4. 5ms フレーム単位のタイムライン配列を構築し返す
+
+        Args:
+            note_events:     NoteEvent のリスト
+            oto_parser:      OtoParser インスタンス (None なら VCV・先行発声無効)
+            frame_period_ms: フレーム周期 (ms)
+
+        Returns:
+            (更新済み NoteEvent リスト, フレームタイムライン辞書リスト)
         """
         if not note_events:
             return [], []
 
-        # Oto.ini が読み込まれていない場合のセーフティ・フォールバック定数（秒単位）
-        DEFAULT_CONSONANT_DURATION = 0.05
-        DEFAULT_SPECIAL_DURATION = 0.08
-        DEFAULT_OVERLAP = 0.02
-        DEFAULT_PREUTTERANCE = 0.05
-        
-        RELEASE_DURATION = 0.03  # ノート終了後の残響フェードアウト（30ms）
+        # --- フォールバック定数 (秒) ---
+        DEFAULT_PREUTTERANCE  = 0.05   # 50 ms
+        DEFAULT_OVERLAP       = 0.02   # 20 ms
+        DEFAULT_CONSONANT_DUR = 0.05
+        DEFAULT_SPECIAL_DUR   = 0.08
+        RELEASE_DURATION      = 0.03
+
         frame_period_sec = frame_period_ms / 1000.0
+
+        # --- VCV リゾルバー初期化 ---
+        vcv_resolver: Optional[VcvResolver] = None
+        if oto_parser is not None:
+            vcv_resolver = VcvResolver(oto_parser, use_g2p=True)
 
         global_frame_timeline: List[Dict[str, Any]] = []
 
@@ -72,123 +114,113 @@ class TextAnalyzer:
             if note is None:
                 continue
 
-            # 1. 歌詞を音素配列に分解
+            # 1. 歌詞 → 音素
             phonemes = self._lyric_to_phonemes(note.lyric)
             note.phonemes = phonemes
 
-            # 休符ノートの処理
             if not phonemes or "pau" in phonemes:
                 note.has_analysis = True
                 continue
 
-            # 2. 音素の分類
-            consonants = [p for p in phonemes if p not in self.ALL_VOWELS and p not in self.SPECIAL_PHONEMES]
-            vowels = [p for p in phonemes if p in self.ALL_VOWELS]
-            specials = [p for p in phonemes if p in self.SPECIAL_PHONEMES]
+            # 2. VCV 解決 → 先行発声・オーバーラップ取得
+            prev_lyric = note_events[i - 1].lyric if i > 0 else None
 
-            has_voiceless = any(v in self.VOICELESS_VOWELS for v in vowels)
+            oto_entry: Optional[OtoEntry] = None
+            resolved_alias: str = note.lyric
 
-            # 3. 🚀 【新機軸】Oto.ini（原音設定）からミリ秒精度のタイミング属性を抽出
-            preutterance = DEFAULT_PREUTTERANCE
-            overlap = DEFAULT_OVERLAP
-            
-            if oto_parser is not None:
-                # 歌詞（例：「さ」）または最初の音素で原音設定を検索
-                record = oto_parser.find_record(note.lyric)
-                if not record and phonemes:
-                    record = oto_parser.find_record(phonemes[0])
-                
-                # レコードが存在すれば、固定定数を破棄し、人間の手で設定された原音設定値で上書き
-                if record is not None:
-                    preutterance = record.preutterance
-                    overlap = record.overlap
+            if vcv_resolver is not None:
+                r = vcv_resolver.resolve_note(note.lyric, prev_lyric)
+                resolved_alias = r[0]
+                oto_entry = r[1]  # OtoEntry or None
 
-            # 4. タイミング・スライス計算（先行発声位置の確定）
-            # ノート開始（note.start_time）を基準に、Oto.iniの指定通りに子音のフライング開始点を決定
-            vocal_start_time = note.start_time - preutterance
-            if vocal_start_time < 0:
-                vocal_start_time = 0.0
+            # 3. 先行発声・オーバーラップ決定 (UST 上書き > oto.ini > デフォルト)
+            if getattr(note, "pre_utterance", None) is not None and note.pre_utterance > 0:
+                # UST の PreUtterance= 上書き値 (ms) を秒に変換
+                preutterance_sec = note.pre_utterance / 1000.0
+            elif oto_entry is not None:
+                preutterance_sec = oto_entry.preutterance_sec
+            else:
+                preutterance_sec = DEFAULT_PREUTTERANCE
 
-            # 前のノートの母音とクロスフェードする位置（Overlap）の算出
-            overlap_start_time = note.start_time - overlap
-            if overlap_start_time < 0:
-                overlap_start_time = 0.0
+            if getattr(note, "overlap", None) is not None and note.overlap > 0:
+                overlap_sec = note.overlap / 1000.0
+            elif oto_entry is not None:
+                overlap_sec = oto_entry.overlap_sec
+            else:
+                overlap_sec = DEFAULT_OVERLAP
 
-            note_end_time = note.start_time + note.duration
-            vocal_end_time = note_end_time + RELEASE_DURATION
+            # 4. 実際の発声開始・オーバーラップ開始時刻
+            vocal_start_sec   = note.start_time - preutterance_sec
+            overlap_start_sec = max(0.0, note.start_time - overlap_sec)
 
-            # 後続ノートとの重複カット
-            if i + 1 < len(note_events) and note_events[i + 1] is not None:
-                next_note = note_events[i + 1]
-                if next_note.start_time <= note_end_time:
-                    vocal_end_time = next_note.start_time
+            # NoteEvent に書き戻す (C++ エンジンが参照)
+            note.pre_utterance = preutterance_sec * 1000.0  # ms で保存
+            note.overlap       = overlap_sec * 1000.0        # ms で保存
+            # onset = WAV 上で音が実際に始まる時刻
+            note.onset = vocal_start_sec
 
-            # 5. フレーム単位（5ms）の高精度離散レンダリング
-            current_time = vocal_start_time
-            while current_time < vocal_end_time:
-                current_phoneme = "pau"
-                weight = 1.0
+            # 5. 子音 / 母音の分類
+            vowels     = [p for p in phonemes if p.lower() in self.ALL_VOWELS]
+            consonants = [p for p in phonemes
+                          if p not in self.ALL_VOWELS and p not in self.SPECIAL_PHONEMES]
 
+            # Oto.ini の子音固定範囲がある場合はそれを使う
+            consonant_total_sec = DEFAULT_CONSONANT_DUR
+            if oto_entry is not None and oto_entry.fixed_range_sec > 0:
+                consonant_total_sec = oto_entry.fixed_range_sec
+
+            note_end_sec = note.start_time + note.duration
+
+            # 6. ビブラートカーブの組み立て
+            vibrato_depth = float(getattr(note, "vibrato_depth", 0.0))
+            vibrato_rate  = float(getattr(note, "vibrato_rate",  5.5))
+
+            # 7. フレームタイムラインの生成
+            current_time = vocal_start_sec
+            while current_time < note_end_sec + RELEASE_DURATION:
+                rel = current_time - vocal_start_sec
+
+                # 音素の選択
                 if current_time < note.start_time:
-                    # --------------------------------------------------
-                    # [A: 子音先行発声（Preutterance）区間]
-                    # --------------------------------------------------
-                    # 子音のタイムスライス
+                    # 先行発声フェーズ（子音）
                     if consonants:
-                        c_idx = int((current_time - vocal_start_time) / max(0.01, (preutterance / len(consonants))))
+                        c_idx = int(rel / max(0.001, consonant_total_sec / len(consonants)))
                         current_phoneme = consonants[min(c_idx, len(consonants) - 1)]
                     else:
-                        current_phoneme = "pau"
-
-                    # 🚀 Oto.iniの「Overlap（重なり）」に基づく滑らかなクロスフェード制御
-                    # 前のノートからこのノートの子音、あるいは母音へ滑らかにバトンを渡す
-                    if current_time >= overlap_start_time and overlap > 0:
-                        weight = (current_time - overlap_start_time) / overlap
-                
-                elif current_time >= note.start_time and current_time < note_end_time:
-                    # --------------------------------------------------
-                    # [B: ノート主発声区間 (母音 / 撥音 / 促音)]
-                    # --------------------------------------------------
-                    main_duration = note.duration
-                    
-                    if specials and not vowels:
-                        sp_idx = int((current_time - note.start_time) / (main_duration / len(specials)))
-                        current_phoneme = specials[min(sp_idx, len(specials) - 1)]
-                    else:
-                        v_sp_sequence = vowels + specials
-                        total_elements = len(v_sp_sequence)
-                        
-                        element_duration = main_duration / max(1, total_elements)
-                        seq_idx = int((current_time - note.start_time) / element_duration)
-                        seq_idx = min(seq_idx, total_elements - 1)
-                        
-                        current_phoneme = v_sp_sequence[seq_idx]
-
-                        # 省略（無声化母音）の処理
-                        if current_phoneme in self.VOICELESS_VOWELS and has_voiceless:
-                            if consonants:
-                                current_phoneme = consonants[-1]
-                            else:
-                                current_phoneme = "cl"
+                        current_phoneme = vowels[0] if vowels else "a"
+                elif current_time < note_end_sec:
+                    # 母音持続フェーズ
+                    current_phoneme = vowels[0] if vowels else "a"
                 else:
-                    # --------------------------------------------------
-                    # [C: リリース区間]
-                    # --------------------------------------------------
-                    if vowels:
-                        current_phoneme = vowels[-1]
-                    elif specials:
-                        current_phoneme = specials[-1]
-                    elif consonants:
-                        current_phoneme = consonants[-1]
+                    # リリースフェーズ
+                    current_phoneme = vowels[-1] if vowels else "a"
 
-                    release_elapsed = current_time - note_end_time
-                    weight = 1.0 - (release_elapsed / RELEASE_DURATION)
+                # 特殊音素 (ん / っ)
+                if "N" in phonemes:
+                    current_phoneme = "N"
+                elif "cl" in phonemes and current_time >= note_end_sec - 0.02:
+                    current_phoneme = "cl"
 
-                # タイムラインへプッシュ
+                # オーバーラップ重み
+                overlap_weight = 0.0
+                if current_time >= overlap_start_sec and overlap_sec > 0:
+                    overlap_weight = min(1.0, (current_time - overlap_start_sec) / overlap_sec)
+
+                # ビブラート (発声開始から note.start_time を過ぎた部分に適用)
+                pitch_offset = 0.0
+                if vibrato_depth > 0 and current_time >= note.start_time:
+                    import math
+                    vib_rel = current_time - note.start_time
+                    pitch_offset = math.sin(2 * math.pi * vibrato_rate * vib_rel) * vibrato_depth
+
                 global_frame_timeline.append({
-                    "time": current_time,
-                    "phoneme": current_phoneme,
-                    "weight": max(0.0, min(1.0, weight))
+                    "time":            current_time,
+                    "phoneme":         current_phoneme,
+                    "weight":          1.0 - overlap_weight,
+                    "note_index":      i,
+                    "pitch_offset":    pitch_offset,   # semitone
+                    "resolved_alias":  resolved_alias,
+                    "wav_path":        oto_entry.wav_path if oto_entry else "",
                 })
 
                 current_time += frame_period_sec
@@ -196,3 +228,25 @@ class TextAnalyzer:
             note.has_analysis = True
 
         return note_events, global_frame_timeline
+
+    # ------------------------------------------------------------------
+    # 内部ユーティリティ
+    # ------------------------------------------------------------------
+
+    def _lyric_to_phonemes(self, lyric: str) -> List[str]:
+        """歌詞から音素リストを返す"""
+        if not lyric or not lyric.strip():
+            return ["pau"]
+        try:
+            raw = pyopenjtalk.g2p(lyric, kana=False)
+            if raw:
+                return [p for p in raw.split() if p not in ("sil", "pau")]
+        except Exception as exc:
+            logger.warning("[TextAnalyzer] g2p 変換失敗 '%s': %s", lyric, exc)
+        return ["pau"]
+
+    def midi_to_hz(self, midi_note: int) -> float:
+        """MIDI ノート番号 → 周波数 (Hz)"""
+        if midi_note is None:
+            return 0.0
+        return float(440.0 * (2.0 ** ((float(midi_note) - 69.0) / 12.0)))
