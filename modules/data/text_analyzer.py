@@ -15,7 +15,6 @@ VO-SE Vocal — テキスト解析 / 発声タイミング整合
 from __future__ import annotations
 
 import os
-import sys
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,7 +22,7 @@ import pyopenjtalk
 
 from modules.data.data_models import NoteEvent
 from modules.data.oto_parser import OtoParser, OtoEntry
-from modules.audio.vcv_resolver import VcvResolver, VowelClassifier
+from modules.audio.vcv_resolver import VcvResolver
 
 logger = logging.getLogger(__name__)
 
