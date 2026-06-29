@@ -17,25 +17,20 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
-if TYPE_CHECKING:
-    from modules.gui.main_window import MainWindow
-
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from modules.data.data_models import NoteEvent
 from modules.data.ust_parser import UstParser, UstConverter
 
+if TYPE_CHECKING:
+    from modules.gui.main_window import MainWindow
+
 logger = logging.getLogger(__name__)
 
-# UST 書き出し時のデフォルト解像度 (ticks/beat)
 _TICKS_PER_BEAT = 480
 
 
 class ProjectIOMixin:
-    """
-    MainWindow に mix-in して使うファイル入出力クラス。
-    self は MainWindow インスタンスとして扱われる。
-    """
 
     # ------------------------------------------------------------------
     # UST 読み込み
