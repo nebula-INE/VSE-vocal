@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from modules.gui.main_window import MainWindow
+    pass
 
 import pyopenjtalk
 
