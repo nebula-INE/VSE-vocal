@@ -973,3 +973,24 @@ class ProjectIOMixin:
     def export_to_midi_file(self):
         """[LIVE] MIDIエクスポート"""
         print("MIDIエクスポートを開始します...")
+
+    def _get_yomi_from_lyrics(self, lyrics: str) -> str:
+        """[LIVE] 歌詞（漢字・かな混じり）を平仮名に変換する"""
+        if not lyrics:
+            return ""
+
+        try:
+            import pykakasi
+            
+            kks = pykakasi.kakasi()
+            result = kks.convert(lyrics)
+            
+            yomi = "".join([str(item.get('hira', '')) for item in result])
+            return yomi
+            
+        except (ImportError, ModuleNotFoundError):
+            print("DEBUG: pykakasi not found. Returning raw lyrics.")
+            return lyrics
+        except Exception as e:
+            print(f"DEBUG: Yomi conversion error: {e}")
+            return lyrics
