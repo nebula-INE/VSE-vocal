@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from modules.data.data_models import NoteEvent
-from modules.data.ust_parser import UstParser, UstConverter, UstProject, UstNote
+from modules.data.ust_parser import UstParser, UstConverter
 
 logger = logging.getLogger(__name__)
 
@@ -561,8 +561,6 @@ class ProjectIOMixin:
 
     def dropEvent(self, event):
         """[LIVE] ファイルドロップ処理"""
-        import shutil
-        import zipfile
         from urllib.parse import urlparse
         from urllib.request import urlretrieve
         import tempfile
