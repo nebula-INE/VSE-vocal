@@ -130,7 +130,7 @@ class TextAnalyzer:
             if vcv_resolver is not None:
                 r = vcv_resolver.resolve_note(note.lyric, prev_lyric)
                 resolved_alias = r[0]
-                oto_entry = r[1]  # OtoEntry or None
+                oto_entry: Optional[OtoEntry] = r[1] 
 
             # 3. 先行発声・オーバーラップ決定 (UST 上書き > oto.ini > デフォルト)
             if getattr(note, "pre_utterance", None) is not None and note.pre_utterance > 0:
