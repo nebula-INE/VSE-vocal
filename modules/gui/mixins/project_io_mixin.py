@@ -15,7 +15,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
+
+if TYPE_CHECKING:
+    from modules.gui.main_window import MainWindow
 
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
@@ -38,7 +41,7 @@ class ProjectIOMixin:
     # UST 読み込み
     # ------------------------------------------------------------------
 
-    def load_ust_file(self, file_path: str) -> bool:
+    def load_ust_file(self: "MainWindow", file_path: str) -> bool:
         """
         .ust ファイルをネイティブパーサーで読み込み、
         タイムラインに反映する。
@@ -324,7 +327,7 @@ class ProjectIOMixin:
             QMessageBox.critical(self, "読み込みエラー", f"JSON の読み込みに失敗しました:\n{exc}")
             return False
 
-    def load_midi_file_from_path(self, file_path: str) -> bool:
+    def load_midi_file_from_path(self: "MainWindow", file_path: str) -> bool:
         """MIDI ファイルを読み込んでタイムラインに設定する"""
         from modules.data.midi_manager import load_midi_file
 
