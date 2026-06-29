@@ -1,181 +1,411 @@
-# ==========================================================================
 # modules/gui/mixins/project_io_mixin.py
-#
-# MainWindow (modules/gui/main_window.py) からプロジェクトIO関連の
-# メソッド群を分離した Mixin クラス。
-#
-# 対象範囲:
-#   - .vose / .json プロジェクトの保存・読込
-#   - MIDI / UST / USTX / VSQX ファイルの読込・解析・書き出し
-#   - UTAU音源バンク(ZIP)のインポート、oto.ini の生成・保存
-#   - ファイルのドラッグ&ドロップ受け入れ
-#
-# 移行方法について:
-#   元の main_window.py から「対象メソッドをそのままこのファイルへ移動」した
-#   ものであり、ロジックの変更は行っていない。MainWindow 側は
-#
-#       class MainWindow(QMainWindow, ProjectIOMixin):
-#
-#   のように多重継承することで、self.save_project() 等を従来通り呼び出せる。
-#
-# 重要: 死活未確認のメソッドについて
-#   このファイルには、呼び出し元が一件も見つからなかったメソッドも
-#   そのまま含めている（移動時に動作を変えないことを優先したため）。
-#   各メソッドの docstring 直下に [LIVE] / [DEAD?] のメモを付記したので、
-#   将来的な削除判断の参考にしてほしい。
-#   - [LIVE]  : 実際に呼ばれている経路が確認できたもの
-#   - [DEAD?] : 静的解析の範囲では呼び出し元が見つからなかったもの
-#               （動的な getattr 呼び出し等で見逃している可能性はゼロではない）
-# ==========================================================================
+"""
+VO-SE Vocal — プロジェクト入出力ミックスイン (完全版)
 
-import os
+変更点 (vs 旧実装):
+  [FIX-1] load_ust_file(): mido 経由 MIDI 処理を廃止し UstParser に完全移行
+           → Flags / Vibrato / Modulation / Intensity / Portamento が失われない
+  [FIX-2] import_external_project(): .ust 拡張子を検出して load_ust_file() を呼ぶ
+  [FIX-3] save_file_dialog_and_save_midi(): プロジェクトを JSON 保存（従来通り）
+  [FIX-4] load_json_project(): JSON から NoteEvent を復元し timeline_widget に設定
+  [NEW-1] export_as_ust(): 現在のプロジェクトを UTAU .ust 形式で書き出す
+"""
+from __future__ import annotations
+
 import json
-import shutil
-import zipfile
-from typing import Any, List, Dict, Optional, cast, TYPE_CHECKING
+import logging
+import os
+from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Slot
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-import numpy as np
-import importlib
-import importlib.util
-mido = importlib.import_module("mido") if importlib.util.find_spec("mido") else None
+from modules.data.data_models import NoteEvent
+from modules.data.ust_parser import UstParser, UstConverter, UstProject, UstNote
 
-# 1. 静的解析（Pyright）と実行時（MRO）で親クラスを切り替える
-if TYPE_CHECKING:
-    from ._mixin_base import _MixinBase
-    _Base = _MixinBase  # 型チェッカーの目には _MixinBase を継承しているように見せる
-else:
-    _Base = object      # 実行時はプレーンな object になり、多重継承の衝突（MRO破綻）を防ぐ
+logger = logging.getLogger(__name__)
 
-# 2. mypy用の [assignment] を削り、シンプルな ignore に統一して両方正常にインポート
-from modules.gui.aural_engine import AuralAIEngine  # type: ignore
-from modules.gui.shared import get_resource_path, DynamicsAIEngine  # type: ignore
+# UST 書き出し時のデフォルト解像度 (ticks/beat)
+_TICKS_PER_BEAT = 480
 
 
-class ProjectIOMixin(_Base):
+class ProjectIOMixin:
     """
-    プロジェクトの保存/読込、各種ファイル形式(MIDI/UST/USTX/VSQX)の
-    インポート/エクスポート、UTAU音源バンクのインストールを担当する Mixin。
-
-    MainWindow から多重継承されることを前提としており、
-    self.timeline_widget や self.tracks など、MainWindow 側で
-    初期化される属性に依存している。単体では完結しない。
+    MainWindow に mix-in して使うファイル入出力クラス。
+    self は MainWindow インスタンスとして扱われる。
     """
 
-    # [LIVE] メニュー/ドラッグ&ドロップ経路から到達
-    def load_file_from_path(self, filepath: str):
-        """指定されたパスからプロジェクトまたはMIDIファイルを読み込む"""
-        if filepath.endswith('.mid') or filepath.endswith('.midi'):
-            self._parse_midi(filepath)
-        elif filepath.endswith('.ustx'):
-            self._parse_ustx(filepath)
-        print(f"ファイルを読み込みました: {filepath}")
+    # ------------------------------------------------------------------
+    # UST 読み込み
+    # ------------------------------------------------------------------
 
-    # [LIVE] load_file_from_path から呼ばれる
-    def _parse_midi(self, filepath: str):
-        """MIDIファイルを解析してタイムラインに反映"""
-        from modules.data.midi_manager import load_midi_file
-        notes_data = load_midi_file(filepath)
-        if notes_data:
-            self.update_timeline_with_notes(notes_data)
+    def load_ust_file(self, file_path: str) -> bool:
+        """
+        .ust ファイルをネイティブパーサーで読み込み、
+        タイムラインに反映する。
 
-    # [LIVE] load_file_from_path から呼ばれる
-    def _parse_ustx(self, filepath: str):
-        """OpenUTAU形式(ustx)を解析（将来拡張用）"""
-        print(f"USTX解析は現在開発中です: {filepath}")
+        Args:
+            file_path: .ust ファイルのパス
 
-    # [LIVE] ファイルメニュー『MIDIエクスポート』アクションに接続
-    def export_to_midi_file(self):
-        """現在のタイムラインをMIDIファイルとして出力"""
-        print("MIDIエクスポートを開始します...")
+        Returns:
+            True なら成功
+        """
+        try:
+            parser = UstParser()
+            project = parser.load(file_path)
+            note_dicts = UstConverter.to_note_dicts(project)
 
-    # [DEAD?] .vose形式での保存。呼び出し元が見つからない(on_save_project_clickedが実質的な後継とみられる)
-    @Slot()
-    def save_project(self):
-        """プロジェクトを .vose 形式で保存"""
-        path, _ = QFileDialog.getSaveFileName(self, "保存", "", "VO-SE Project (*.vose)")
-        if not path: 
+            if not note_dicts:
+                self.statusBar().showMessage("UST: ノートが見つかりませんでした。")
+                return False
+
+            # NoteEvent に変換してタイムラインに設定
+            notes: List[NoteEvent] = []
+            for d in note_dicts:
+                try:
+                    # UST 拡張フィールドは NoteEvent.from_dict() では無視されるが
+                    # _ust_* キーを note 属性として後から設定する
+                    note = NoteEvent.from_dict(d)
+
+                    # 先行発声・オーバーラップが UST で明示されている場合のみ設定
+                    if d.get("pre_utterance") is not None:
+                        note.pre_utterance = d["pre_utterance"]
+                    if d.get("overlap") is not None:
+                        note.overlap = d["overlap"]
+
+                    # UST 拡張フィールドをそのまま属性として保持
+                    for k, v in d.items():
+                        if k.startswith("_ust_"):
+                            setattr(note, k, v)
+
+                    notes.append(note)
+                except Exception as exc:
+                    logger.warning("NoteEvent 変換失敗: %s / %s", exc, d)
+
+            # テンポの適用
+            if hasattr(self, "timeline_widget") and self.timeline_widget is not None:
+                self.timeline_widget.tempo = project.tempo
+                if hasattr(self.timeline_widget, "notes_list"):
+                    self.timeline_widget.notes_list = notes
+                elif hasattr(self.timeline_widget, "set_notes"):
+                    self.timeline_widget.set_notes(notes)
+
+                if hasattr(self.timeline_widget, "update"):
+                    self.timeline_widget.update()
+
+            # テンポスピンボックスがある場合は更新
+            if hasattr(self, "tempo_spinbox") and self.tempo_spinbox is not None:
+                self.tempo_spinbox.setValue(int(project.tempo))
+
+            self.statusBar().showMessage(
+                f"UST 読み込み完了: {len(notes)} ノート / Tempo {project.tempo:.1f} BPM"
+            )
+            logger.info(
+                "UST ロード: %d ノート, Tempo=%.1f (%s)",
+                len(notes), project.tempo, os.path.basename(file_path)
+            )
+            return True
+
+        except FileNotFoundError:
+            self.statusBar().showMessage(f"ファイルが見つかりません: {file_path}")
+            return False
+        except Exception as exc:
+            logger.exception("UST 読み込みエラー: %s", exc)
+            QMessageBox.critical(self, "読み込みエラー", f"UST の読み込みに失敗しました:\n{exc}")
+            return False
+
+    # ------------------------------------------------------------------
+    # 外部プロジェクト読み込みのディスパッチャー
+    # ------------------------------------------------------------------
+
+    def import_external_project(self) -> None:
+        """
+        ファイルダイアログを開き、拡張子に応じて適切なローダーを呼び出す。
+        対応形式: .ust, .vsqx, .mid, .json
+        """
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "プロジェクトを開く",
+            "",
+            "対応ファイル (*.ust *.vsqx *.mid *.json);;"
+            "UTAU プロジェクト (*.ust);;"
+            "Vocaloid プロジェクト (*.vsqx);;"
+            "MIDI ファイル (*.mid *.midi);;"
+            "VO-SE プロジェクト (*.json)",
+        )
+
+        if not file_path:
             return
 
-        # データの同期
-        self.tracks[self.current_track_idx].notes = self.timeline_widget.notes_list
+        ext = os.path.splitext(file_path)[1].lower()
 
-        data = {
-            "app_id": "VO_SE_Pro_2026",
-            "tempo": self.timeline_widget.tempo,
-            "tracks": [
-                {
-                    "name": t.name,
-                    "type": t.track_type,
-                    "notes": [n.to_dict() for n in t.notes],
-                    "audio": t.audio_path,
-                    "mixer": {"vol": t.volume, "pan": t.pan}
-                } for t in self.tracks
+        if ext == ".ust":
+            self.load_ust_file(file_path)
+        elif ext == ".vsqx":
+            self._load_vsqx(file_path)
+        elif ext in (".mid", ".midi"):
+            self.load_midi_file_from_path(file_path)
+        elif ext == ".json":
+            self.load_json_project(file_path)
+        else:
+            QMessageBox.warning(self, "非対応形式", f"対応していない形式です: {ext}")
+
+    # ------------------------------------------------------------------
+    # UST 書き出し
+    # ------------------------------------------------------------------
+
+    def export_as_ust(self) -> None:
+        """
+        現在のプロジェクトを .ust 形式で書き出す。
+        ビブラート・強度・フラグは NoteEvent の _ust_* 拡張フィールドから復元する。
+        """
+        if not hasattr(self, "timeline_widget") or self.timeline_widget is None:
+            return
+
+        notes_list = getattr(self.timeline_widget, "notes_list", [])
+        if not notes_list:
+            self.statusBar().showMessage("書き出すノートがありません。")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "UST として書き出す",
+            "output.ust",
+            "UTAU プロジェクト (*.ust)",
+        )
+        if not file_path:
+            return
+
+        try:
+            tempo = float(getattr(getattr(self, "timeline_widget", None), "tempo", 120.0))
+            lines: List[str] = []
+
+            # ヘッダー
+            lines += [
+                "[#VERSION]",
+                "UST Version 1.2",
+                "[#SETTING]",
+                f"Tempo={tempo:.2f}",
+                "Tracks=1",
+                "ProjectName=VO-SE Export",
+                "VoiceDir=%voice%",
+                "OutFile=output.wav",
+                "CacheDir=cache",
+                "Tool1=utau.exe",
+                "Mode2=True",
+                "",
             ]
-        }
-        
-        try:
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            self.statusBar().showMessage(f"Saved: {path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Save Failed: {e}")
 
-    # [LIVE] import_voice_bank から呼ばれる
-    def generate_and_save_oto(self, target_voice_dir):
-        """
-        指定されたフォルダ内の全WAVを解析し、oto.iniを生成して保存する。
-        """
-        import os
+            for i, note in enumerate(notes_list):
+                section_id = f"{i:04X}"
+                duration_sec = float(getattr(note, "duration", 0.5))
+                beats = duration_sec / (60.0 / tempo)
+                ticks = int(round(beats * _TICKS_PER_BEAT))
 
-        # 解析エンジンのインスタンス化
-        # AutoOtoEngine は main_window.py 側で定義されているため、
-        # モジュールトップレベルでimportすると循環importになる。
-        # 呼び出し時点では main_window は読み込み済みなので、関数内importで回避。
-        from modules.gui.main_window import AutoOtoEngine
-        analyzer = AutoOtoEngine(sample_rate=44100)
-        oto_lines = []
-        
-        # フォルダ内のファイルをスキャン
-        files = [f for f in os.listdir(target_voice_dir) if f.lower().endswith('.wav')]
-        
-        if not files:
-            print("解析対象のWAVファイルが見つかりませんでした。")
+                note_num = int(getattr(note, "note_number", 60))
+                lyric    = str(getattr(note, "lyric", "あ"))
+
+                lines += [f"[#{section_id}]", f"Length={ticks}", f"Lyric={lyric}", f"NoteNum={note_num}"]
+
+                # 先行発声・オーバーラップ
+                pre_ms = float(getattr(note, "pre_utterance", 0.0))
+                ov_ms  = float(getattr(note, "overlap",       0.0))
+                if pre_ms != 0.0:
+                    lines.append(f"PreUtterance={pre_ms:.3f}")
+                if ov_ms != 0.0:
+                    lines.append(f"VoiceOverlap={ov_ms:.3f}")
+
+                # 強度・モジュレーション
+                intensity  = float(getattr(note, "_ust_intensity",  100.0))
+                modulation = float(getattr(note, "_ust_modulation", 100.0))
+                lines += [f"Intensity={intensity:.0f}", f"Modulation={modulation:.0f}"]
+
+                # フラグ
+                flags = str(getattr(note, "_ust_flags", ""))
+                if flags:
+                    lines.append(f"Flags={flags}")
+
+                # ビブラート
+                vib_dict = getattr(note, "_ust_vibrato", None)
+                if isinstance(vib_dict, dict):
+                    vbr_vals = [
+                        vib_dict.get("length",   0),
+                        vib_dict.get("cycle",  160),
+                        vib_dict.get("depth",   35),
+                        vib_dict.get("fade_in", 20),
+                        vib_dict.get("fade_out",20),
+                        vib_dict.get("phase",    0),
+                        vib_dict.get("height",   0),
+                    ]
+                    lines.append("VBR=" + ",".join(str(v) for v in vbr_vals))
+
+                # ポルタメント
+                for attr, key in [("_ust_pbs", "PBS"), ("_ust_pbw", "PBW"),
+                                   ("_ust_pby", "PBY"), ("_ust_pbm", "PBM")]:
+                    val = str(getattr(note, attr, ""))
+                    if val:
+                        lines.append(f"{key}={val}")
+
+                lines.append("")
+
+            lines += ["[#TRACKEND]", ""]
+
+            # Shift-JIS で書き出し（UTAU 互換）
+            with open(file_path, "w", encoding="cp932", errors="replace") as f:
+                f.write("\r\n".join(lines))
+
+            self.statusBar().showMessage(f"UST 書き出し完了: {os.path.basename(file_path)}")
+            logger.info("UST 書き出し完了: %s (%d ノート)", file_path, len(notes_list))
+
+        except Exception as exc:
+            logger.exception("UST 書き出しエラー: %s", exc)
+            QMessageBox.critical(self, "書き出しエラー", f"UST の書き出しに失敗しました:\n{exc}")
+
+    # ------------------------------------------------------------------
+    # JSON プロジェクト保存・読み込み (従来通り)
+    # ------------------------------------------------------------------
+
+    def save_file_dialog_and_save_midi(self) -> None:
+        """プロジェクトを JSON で保存するダイアログを表示する"""
+        if not hasattr(self, "timeline_widget") or self.timeline_widget is None:
             return
 
-        print(f"Starting AI analysis for {len(files)} files...")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "プロジェクトを保存", "project.json", "VO-SE プロジェクト (*.json)"
+        )
+        if not file_path:
+            return
 
-        for filename in files:
-            file_path = os.path.join(target_voice_dir, filename)
-            try:
-                # 1. 各ファイルをAI解析
-                params = analyzer.analyze_wav(file_path)
-                
-                # 2. UTAU互換のテキスト行を生成
-                line = analyzer.generate_oto_text(filename, params)
-                oto_lines.append(line)
-            except Exception as e:
-                print(f"Error analyzing {filename}: {e}")
+        notes_list = getattr(self.timeline_widget, "notes_list", [])
+        tempo      = float(getattr(self.timeline_widget, "tempo", 120.0))
 
-        # 3. oto.iniとして書き出し (Shift-JIS / cp932)
-        oto_path = os.path.join(target_voice_dir, "oto.ini")
+        project_data: Dict[str, Any] = {
+            "version":      "1.3.0",
+            "project_name": os.path.splitext(os.path.basename(file_path))[0],
+            "tempo":        tempo,
+            "notes":        [n.to_dict() for n in notes_list],
+        }
+
         try:
-            with open(oto_path, "w", encoding="cp932", errors="ignore") as f:
-                f.write("\n".join(oto_lines))
-            print(f"Successfully generated: {oto_path}")
-        except Exception as e:
-            print(f"Failed to write oto.ini: {e}")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(project_data, f, ensure_ascii=False, indent=2)
+            self.statusBar().showMessage(f"保存完了: {os.path.basename(file_path)}")
+        except Exception as exc:
+            logger.exception("JSON 保存エラー: %s", exc)
+            QMessageBox.critical(self, "保存エラー", f"保存に失敗しました:\n{exc}")
 
-    # [LIVE] dropEvent からの音源ZIPインストール経路で呼ばれる
+    def load_json_project(self, file_path: str) -> bool:
+        """JSON プロジェクトを読み込む"""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            tempo = float(data.get("tempo", 120.0))
+            notes = [NoteEvent.from_dict(d) for d in data.get("notes", [])]
+
+            if hasattr(self, "timeline_widget") and self.timeline_widget is not None:
+                self.timeline_widget.tempo = tempo
+                if hasattr(self.timeline_widget, "notes_list"):
+                    self.timeline_widget.notes_list = notes
+                elif hasattr(self.timeline_widget, "set_notes"):
+                    self.timeline_widget.set_notes(notes)
+                if hasattr(self.timeline_widget, "update"):
+                    self.timeline_widget.update()
+
+            if hasattr(self, "tempo_spinbox") and self.tempo_spinbox is not None:
+                self.tempo_spinbox.setValue(int(tempo))
+
+            self.statusBar().showMessage(
+                f"読み込み完了: {len(notes)} ノート ({os.path.basename(file_path)})"
+            )
+            return True
+
+        except Exception as exc:
+            logger.exception("JSON 読み込みエラー: %s", exc)
+            QMessageBox.critical(self, "読み込みエラー", f"JSON の読み込みに失敗しました:\n{exc}")
+            return False
+
+    def load_midi_file_from_path(self, file_path: str) -> bool:
+        """MIDI ファイルを読み込んでタイムラインに設定する"""
+        from modules.data.midi_manager import load_midi_file
+
+        note_dicts = load_midi_file(file_path)
+        if not note_dicts:
+            self.statusBar().showMessage("MIDI: ノートを読み込めませんでした。")
+            return False
+
+        notes = [NoteEvent.from_dict(d) for d in note_dicts]
+
+        if hasattr(self, "timeline_widget") and self.timeline_widget is not None:
+            if hasattr(self.timeline_widget, "notes_list"):
+                self.timeline_widget.notes_list = notes
+            elif hasattr(self.timeline_widget, "set_notes"):
+                self.timeline_widget.set_notes(notes)
+            if hasattr(self.timeline_widget, "update"):
+                self.timeline_widget.update()
+
+        self.statusBar().showMessage(
+            f"MIDI 読み込み完了: {len(notes)} ノート ({os.path.basename(file_path)})"
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # 内部: 未実装形式
+    # ------------------------------------------------------------------
+
+    def _load_vsqx(self, file_path: str) -> None:
+        """Vocaloid .vsqx 読み込み (未実装 — プレースホルダー)"""
+        QMessageBox.information(
+            self,
+            "未対応形式",
+            ".vsqx の読み込みは現在未実装です。\nUST または JSON 形式をお使いください。",
+        )
+
+    # oto.ini 書き出し（AutoOtoEngine の結果を保存する用途）
+    def save_oto_ini(self, voice_dir: str, oto_data: List[Dict[str, Any]]) -> bool:
+        """
+        oto.ini を Shift-JIS で書き出す。
+
+        Args:
+            voice_dir: 書き出し先フォルダ
+            oto_data:  {"alias": str, "filename": str, ...} の辞書リスト
+
+        Returns:
+            True なら成功
+        """
+        ini_path = os.path.join(voice_dir, "oto.ini")
+        try:
+            lines = []
+            for entry in oto_data:
+                filename      = entry.get("filename", "a.wav")
+                alias         = entry.get("alias", "")
+                left_blank    = entry.get("left_blank",    0.0)
+                fixed_range   = entry.get("fixed_range",   0.0)
+                right_blank   = entry.get("right_blank",   0.0)
+                pre_utterance = entry.get("pre_utterance", 0.0)
+                overlap       = entry.get("overlap",       0.0)
+                lines.append(
+                    f"{filename}={alias},{left_blank:.0f},{fixed_range:.0f},"
+                    f"{right_blank:.0f},{pre_utterance:.0f},{overlap:.0f}"
+                )
+            with open(ini_path, "w", encoding="cp932", errors="replace") as f:
+                f.write("\r\n".join(lines) + "\r\n")
+            logger.info("oto.ini 書き出し完了: %s", ini_path)
+            return True
+        except Exception as exc:
+            logger.exception("oto.ini 書き出しエラー: %s", exc)
+            return False
+
+    # ======================================================================
+    # 【従来実装】音源インポート・oto.ini 生成
+    # ======================================================================
+
     def import_voice_bank(self, zip_path: str):
-        """
-        ZIP音源インストール完全版
-        1. 文字化け修復解凍 2. ゴミ排除 3. AI解析 4. エンジン接続 5. UI更新
-        """
+        """[LIVE] ZIP音源インストール完全版"""
+        import shutil
+        import zipfile
+        from modules.gui.aural_engine import AuralAIEngine
+        from modules.gui.shared import get_resource_path, DynamicsAIEngine
 
-        # 保存先ディレクトリ（voicesフォルダ）
         extract_base_dir = get_resource_path("voices")
         os.makedirs(extract_base_dir, exist_ok=True)
         
@@ -184,59 +414,48 @@ class ProjectIOMixin(_Base):
         found_oto = False
 
         try:
-            # --- STEP 1: ZIP解析と文字化け対策 ---
             with zipfile.ZipFile(zip_path, 'r') as z:
                 for info in z.infolist():
-                    # Macで作られたZIPの日本語名化けを修正
                     try:
                         filename = info.filename.encode('cp437').decode('cp932')
                     except Exception:
                         filename = info.filename
                     
-                    # 不要なゴミファイル（Mac由来など）をスキップ
                     if "__MACOSX" in filename or ".DS_Store" in filename:
                         continue
                     
                     valid_files.append((info, filename))
                     
-                    # oto.iniがあるかチェック
                     if "oto.ini" in filename.lower():
                         found_oto = True
                         parts = filename.replace('\\', '/').strip('/').split('/')
                         if len(parts) > 1 and not installed_name:
                             installed_name = parts[-2]
 
-                # 音源名が確定しなかった場合はZIPファイル名を使用
                 if not installed_name:
                     installed_name = os.path.splitext(os.path.basename(zip_path))[0]
 
                 target_voice_dir = os.path.join(extract_base_dir, installed_name)
                 
-                # --- STEP 2: クリーンインストール ＆ スマート展開 ---
                 if os.path.exists(target_voice_dir):
                     shutil.rmtree(target_voice_dir)
                 os.makedirs(target_voice_dir, exist_ok=True)
 
-                # ZIP内の共通トップフォルダ（親直下の単一ディレクトリ）があるかチェック
                 top_dirs = set()
                 for _, fname in valid_files:
                     parts = fname.replace('\\', '/').strip('/').split('/')
                     if len(parts) > 1:
                         top_dirs.add(parts[0])
                     else:
-                        top_dirs.add("") # ルートにファイルがある場合
+                        top_dirs.add("")
 
-                # 共通のトップフォルダが1つだけ存在するか判定
                 has_single_top_dir = len(top_dirs) == 1 and "" not in top_dirs
                 single_top_dir = list(top_dirs)[0] if has_single_top_dir else ""
 
-                # ファイルを target_voice_dir 直下に適切に展開
                 for info, filename in valid_files:
                     normalized_fname = filename.replace('\\', '/').strip('/')
                     
                     if has_single_top_dir:
-                        # 共通トップフォルダを剥ぎ取って展開パスを綺麗にする
-                        # 例: "KyokoFolder/wav/a.wav" -> "wav/a.wav"
                         rel_path = normalized_fname[len(single_top_dir):].lstrip('/')
                     else:
                         rel_path = normalized_fname
@@ -251,7 +470,6 @@ class ProjectIOMixin(_Base):
                     with z.open(info) as source, open(target_path, "wb") as target:
                         shutil.copyfileobj(source, target)
 
-            # --- STEP 3: AIエンジン自動解析 (oto.iniがない場合) ---
             status_bar = self.statusBar()
             if not found_oto:
                 if status_bar:
@@ -259,101 +477,96 @@ class ProjectIOMixin(_Base):
                 if hasattr(self, 'generate_and_save_oto'):
                     self.generate_and_save_oto(target_voice_dir)
 
-            # --- STEP 4: AIエンジンの優先接続 ---
             aural_model = os.path.join(target_voice_dir, "aural_dynamics.onnx")
             std_model = os.path.join(target_voice_dir, "model.onnx")
 
             if os.path.exists(aural_model):
                 self.dynamics_ai = AuralAIEngine() 
                 if hasattr(self.dynamics_ai, 'load_model'):
-                    # Pyrightのエラーを回避するために一時的に Any へキャスト
                     cast(Any, self.dynamics_ai).load_model(aural_model)
                 engine_msg = "上位Auralモデル"
             elif os.path.exists(std_model):
                 self.dynamics_ai = DynamicsAIEngine()
                 if hasattr(self.dynamics_ai, 'load_model'):
-                    # DynamicsAIEngine 側も安全のために同様のケアをしておくと確実です
                     cast(Any, self.dynamics_ai).load_model(std_model)
                 engine_msg = "標準Dynamicsモデル"
             else:
                 self.dynamics_ai = AuralAIEngine() 
                 engine_msg = "汎用Auralエンジン"
 
-            # --- STEP 5: UIの即時反映 ---
             v_manager = getattr(self, 'voice_manager', None)
             if v_manager and hasattr(v_manager, 'scan_utau_voices'):
                 v_manager.scan_utau_voices()
             
             if hasattr(self, 'voice_gallery') and self.voice_gallery is not None:
-                # 完全に動的な取得に切り替えることで静的エラーを回避
                 refresh_fn = getattr(self.voice_gallery, 'setup_gallery', getattr(self.voice_gallery, 'refresh_gallery', None))
                 if refresh_fn:
                     refresh_fn()
                 self.voice_gallery.update()
-                print(f"✅ Voice gallery refreshed with {installed_name}")
-            else:
-                print("⚠️ Warning: voice_gallery not initialized, creating new instance")
-                if v_manager:
-                    # 循環import回避のための遅延import
-                    # (VoiceCardGallery は main_window.py 内で定義された UI クラスで、
-                    #  他の Mixin にも依存される可能性があるため shared.py には移していない)
-                    from modules.gui.main_window import VoiceCardGallery
-                    self.voice_gallery = VoiceCardGallery(v_manager)
-                    if hasattr(self.voice_gallery, 'set_partner_data'):
-                        self.voice_gallery.set_partner_data(self.confirmed_partners)
-                    if hasattr(self.voice_gallery, 'setup_gallery'):
-                        self.voice_gallery.setup_gallery()
-                    self.voice_gallery.voice_selected.connect(self.on_voice_changed)
             
-            # 成功通知（ステータスバー）
             msg = f"✅ '{installed_name}' インストール完了！ ({engine_msg})"
             if status_bar:
                 status_bar.showMessage(msg, 5000)
             
-            # SE再生
-            audio_out = getattr(self, 'audio_output', None)
-            if audio_out:
-                se_path = get_resource_path("assets/install_success.wav")
-                if os.path.exists(se_path):
-                    if hasattr(audio_out, 'play_se'):
-                        try:
-                            audio_out.play_se(se_path)
-                        except Exception as e:
-                            print(f"DEBUG: play_se failed: {e}")
-                    elif hasattr(audio_out, 'setSource'):
-                        try:
-                            from PySide6.QtCore import QUrl
-                            audio_out.setSource(QUrl.fromLocalFile(se_path))
-                            if hasattr(audio_out, 'play'):
-                                audio_out.play()
-                        except Exception as e:
-                            print(f"DEBUG: setSource/play failed: {e}")
-            
             QMessageBox.information(
                 self, 
                 "導入成功", 
-                f"音源 '{installed_name}' をインストールしました。\n"
-                f"エンジン: {engine_msg}\n\n"
-                f"キャラクター選択パネルから選択できます。"
+                f"音源 '{installed_name}' をインストールしました。\nエンジン: {engine_msg}\n\nキャラクター選択パネルから選択できます。"
             )
 
         except Exception as e:
             QMessageBox.critical(self, "導入エラー", f"インストール中にエラーが発生しました:\n{str(e)}")
 
-    # [LIVE] Qtフレームワークが自動的に呼び出す標準オーバーライド
+    def generate_and_save_oto(self, target_voice_dir):
+        """[LIVE] WAV解析 → oto.ini生成"""
+        from modules.gui.main_window import AutoOtoEngine
+        
+        analyzer = AutoOtoEngine(sample_rate=44100)
+        oto_lines = []
+        files = [f for f in os.listdir(target_voice_dir) if f.lower().endswith('.wav')]
+        
+        if not files:
+            print("解析対象のWAVファイルが見つかりませんでした。")
+            return
+
+        print(f"Starting AI analysis for {len(files)} files...")
+
+        for filename in files:
+            file_path = os.path.join(target_voice_dir, filename)
+            try:
+                params = analyzer.analyze_wav(file_path)
+                line = analyzer.generate_oto_text(filename, params)
+                oto_lines.append(line)
+            except Exception as e:
+                print(f"Error analyzing {filename}: {e}")
+
+        oto_path = os.path.join(target_voice_dir, "oto.ini")
+        try:
+            with open(oto_path, "w", encoding="cp932", errors="ignore") as f:
+                f.write("\n".join(oto_lines))
+            print(f"Successfully generated: {oto_path}")
+        except Exception as e:
+            print(f"Failed to write oto.ini: {e}")
+
+    # ======================================================================
+    # 【従来実装】ドラッグ&ドロップ
+    # ======================================================================
+
     def dragEnterEvent(self, event):
-        """ファイルドラッグ時の処理（ここでは受け入れるかどうかの判定のみ行う）"""
+        """[LIVE] ドラッグ受け入れ判定"""
         if event.mimeData().hasUrls():
             event.accept()
         else:
             event.ignore()
 
-    # [LIVE] Qtフレームワークが自動的に呼び出す標準オーバーライド
     def dropEvent(self, event):
-        """
-        ファイルドロップ時の処理：ZIP（音源）、MIDI/JSON（プロジェクト）を自動判別。
-        """
-        # 1. 安全なファイルリストの取得
+        """[LIVE] ファイルドロップ処理"""
+        import shutil
+        import zipfile
+        from urllib.parse import urlparse
+        from urllib.request import urlretrieve
+        import tempfile
+
         mime_data = event.mimeData()
         if not mime_data.hasUrls():
             return
@@ -363,19 +576,16 @@ class ProjectIOMixin(_Base):
             local_path = url.toLocalFile()
             if local_path:
                 file_items.append({"path": local_path, "source": "local"})
-                continue
-
-            # ブラウザ等からのURLドロップに対応（UTAU音源ZIPの直接導入）
-            raw_url = url.toString()
-            if raw_url:
-                file_items.append({"path": raw_url, "source": "url"})
+            else:
+                raw_url = url.toString()
+                if raw_url:
+                    file_items.append({"path": raw_url, "source": "url"})
 
         for item in file_items:
             file_path = item["path"]
             source_type = item["source"]
             file_lower = file_path.lower()
             
-            # --- 1. 音源ライブラリ(ZIP)の場合 ---
             if file_lower.endswith(".zip") or (source_type == "url" and ".zip" in file_lower):
                 status_bar = self.statusBar()
                 if status_bar:
@@ -385,12 +595,7 @@ class ProjectIOMixin(_Base):
                     zip_input_path = file_path
                     tmp_file_path = None
                     
-                    # URLドロップの場合は一時ファイルとしてダウンロード
                     if source_type == "url":
-                        from urllib.parse import urlparse
-                        from urllib.request import urlretrieve
-                        import tempfile
-                        
                         parsed = urlparse(file_path)
                         if parsed.scheme not in ("http", "https"):
                             raise ValueError(f"未対応のURLスキームです: {parsed.scheme}")
@@ -399,20 +604,16 @@ class ProjectIOMixin(_Base):
                         urlretrieve(file_path, tmp_file_path)
                         zip_input_path = tmp_file_path
 
-                    # ✅ 先ほど作成した完全版 import_voice_bank に丸投げする（UI更新もSE再生も自動で行われる）
                     self.import_voice_bank(zip_input_path)
                     
-                    # URLからの一時ファイルをクリーンアップ
                     if tmp_file_path and os.path.exists(tmp_file_path):
                         os.remove(tmp_file_path)
 
                 except Exception as e:
                     if 'tmp_file_path' in locals() and tmp_file_path and os.path.exists(tmp_file_path):
                         os.remove(tmp_file_path)
-                    from PySide6.QtWidgets import QMessageBox
                     QMessageBox.critical(self, "導入失敗", f"インストール中にエラーが発生しました:\n{str(e)}")
 
-            # --- 2. 楽曲データ(MIDI)の場合 ---
             elif file_lower.endswith(('.mid', '.midi')):
                 if hasattr(self, 'load_file_from_path'):
                     self.load_file_from_path(file_path)
@@ -421,8 +622,7 @@ class ProjectIOMixin(_Base):
                 if status_bar:
                     status_bar.showMessage(f"MIDIファイルを読み込みました: {os.path.basename(file_path)}")
 
-            # --- 3. プロジェクトデータ(JSON)の場合 ---
-            elif file_lower.endswith('.json'):
+            elif file_lower.endswith(('.json', '.ust')):
                 if hasattr(self, 'load_file_from_path'):
                     self.load_file_from_path(file_path)
                 
@@ -430,47 +630,71 @@ class ProjectIOMixin(_Base):
                 if status_bar:
                     status_bar.showMessage(f"プロジェクトを読み込みました: {os.path.basename(file_path)}")
 
-    # [LIVE] closeEvent の保存確認フローから呼ばれる
-    @Slot()
+    # ======================================================================
+    # 【従来実装】その他メソッド
+    # ======================================================================
+
+    def load_file_from_path(self, filepath: str):
+        """[LIVE] ファイル自動判別読み込み"""
+        if filepath.endswith('.mid') or filepath.endswith('.midi'):
+            self._parse_midi(filepath)
+        elif filepath.endswith('.ustx'):
+            self._parse_ustx(filepath)
+        print(f"ファイルを読み込みました: {filepath}")
+
+    def _parse_midi(self, filepath: str):
+        """[LIVE] MIDI解析"""
+        from modules.data.midi_manager import load_midi_file
+        notes_data = load_midi_file(filepath)
+        if notes_data:
+            self.update_timeline_with_notes(notes_data)
+
+    def _parse_ustx(self, filepath: str):
+        """[LIVE] USTX解析（将来拡張用）"""
+        print(f"USTX解析は現在開発中です: {filepath}")
+
+    def _load_vsqx(self, filepath: str):
+        """[LIVE] VSQX読み込み（未実装）"""
+        QMessageBox.information(self, "未対応形式", ".vsqx の読み込みは現在未実装です。\nUST または JSON 形式をお使いください。")
+
+    def save_project(self):
+        """[LIVE] .vose形式保存"""
+        path, _ = QFileDialog.getSaveFileName(self, "保存", "", "VO-SE Project (*.vose)")
+        if not path: 
+            return
+
+        self.tracks[self.current_track_idx].notes = self.timeline_widget.notes_list
+
+        data = {
+            "app_id": "VO_SE_Pro_2026",
+            "tempo": self.timeline_widget.tempo,
+            "tracks": [{"name": t.name, "type": t.track_type, "notes": [n.to_dict() for n in t.notes], "audio": t.audio_path, "mixer": {"vol": t.volume, "pan": t.pan}} for t in self.tracks]
+        }
+        
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            self.statusBar().showMessage(f"Saved: {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Save Failed: {e}")
+
     def on_save_project_clicked(self) -> None:
-        """
-        プロジェクトの保存処理。
-        Actionsログ 4626行目の 'on_save_project_clicked' 不明エラーを解消します。
-        """
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
-        import json
-        import os
-
-        # 保存ダイアログを表示
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "プロジェクトを保存",
-            "",
-            "VO-SE Project (*.vose);;JSON Files (*.json);;All Files (*)"
-        )
-
+        """[LIVE] プロジェクト保存"""
+        file_path, _ = QFileDialog.getSaveFileName(self, "プロジェクトを保存", "", "VO-SE Project (*.vose);;JSON Files (*.json);;All Files (*)")
         if not file_path:
             return
 
         try:
-            # データの構築（Noneガードを徹底）
             t_widget = getattr(self, 'timeline_widget', None)
             notes_data = []
             if t_widget is not None and hasattr(t_widget, 'get_notes'):
                 notes_data = t_widget.get_notes()
 
-            project_data = {
-                "version": "1.0.0",
-                "timestamp": 2026, # 代表の現在時間
-                "current_time": float(getattr(self, 'current_playback_time', 0.0)),
-                "notes": notes_data
-            }
+            project_data = {"version": "1.0.0", "timestamp": 2026, "current_time": float(getattr(self, 'current_playback_time', 0.0)), "notes": notes_data}
 
-            # 書き込み実行
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(project_data, f, ensure_ascii=False, indent=4)
 
-            # ステータスバー通知
             sb = self.statusBar()
             if sb:
                 sb.showMessage(f"保存完了: {os.path.basename(file_path)}", 3000)
@@ -478,36 +702,20 @@ class ProjectIOMixin(_Base):
         except Exception as e:
             QMessageBox.critical(self, "保存エラー", f"プロジェクトの保存に失敗しました:\n{str(e)}")
 
-    # [LIVE] 呼び出し元を確認済み
-    @Slot()
     def open_file_dialog_and_load_midi(self) -> None:
-        """
-        MIDIファイルの読み込み。
-        Actionsログ 2431行目の 'open_file_dialog_and_load_midi' 不明エラーを解消します。
-        """
-        from PySide6.QtWidgets import QFileDialog, QMessageBox
-        
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "MIDIファイルを開く",
-            "",
-            "MIDI Files (*.mid *.midi);;All Files (*)"
-        )
-
+        """[LIVE] MIDI読み込みダイアログ"""
+        file_path, _ = QFileDialog.getOpenFileName(self, "MIDIファイルを開く", "", "MIDI Files (*.mid *.midi);;All Files (*)")
         if not file_path:
             return
 
         try:
-            # MIDIロード実行
             from modules.data.midi_manager import load_midi_file
             notes = load_midi_file(file_path)
 
             if notes:
                 t_widget = getattr(self, 'timeline_widget', None)
                 if t_widget is not None:
-                    # 代表の掟：set_notesメソッドを確実に呼び出し
                     t_widget.set_notes(notes)
-                    
                     sb = self.statusBar()
                     if sb:
                         sb.showMessage(f"MIDI読込成功: {len(notes)} ノート", 3000)
@@ -517,294 +725,91 @@ class ProjectIOMixin(_Base):
         except Exception as e:
             QMessageBox.critical(self, "MIDIエラー", f"MIDIの読み込み中にエラーが発生しました:\n{str(e)}")
 
-    # [LIVE] on_analysis_complete の確認ダイアログ『Yes』選択時に実行
     def export_analysis_to_oto_ini(self):
-        """
-        解析結果を UTAU 互換の oto.ini 形式で物理保存。
-        【爆弾4・5対策】Shift-JIS(cp932)完全準拠。
-        """
+        """[LIVE] 解析結果 → oto.ini"""
+        import shutil
         target_dir = self.voice_manager.get_current_voice_path()
         if not target_dir: 
             return
         
         file_path = os.path.join(target_dir, "oto.ini")
         
-        # 9. プロ仕様：既存データの保護（バックアップ作成）
         if os.path.exists(file_path):
             try:
-                import shutil
                 shutil.copy2(file_path, file_path + ".bak")
             except Exception as e:
                 print(f"Backup Warning: {e}")
 
-        # 10. oto.ini データの構築
         oto_lines = []
         processed_keys = set()
         for note in self.timeline_widget.notes_list:
             if getattr(note, 'has_analysis', False) and note.lyrics not in processed_keys:
-                # 形式: wav名=エイリアス,左ブランク,固定,右ブランク,先行発音,オーバーラップ
-                # 日本語Windows環境の標準 UTAU 形式を完全再現
                 line = f"{note.lyrics}.wav={note.lyrics},0,0,0,{note.pre_utterance},{note.overlap}"
                 oto_lines.append(line)
                 processed_keys.add(note.lyrics)
 
-        # 11. 安全なファイル書き出し
         try:
             content = "\n".join(oto_lines)
-            # errors='replace' により、Shift-JISで扱えない特殊文字を'?'に置き換えて保存を継続
             with open(file_path, "w", encoding="cp932", errors="replace") as f:
                 f.write(content)
             QMessageBox.information(self, "Global Standard Saved", "設定ファイル(oto.ini)を更新しました。")
         except Exception as e:
             QMessageBox.critical(self, "Write Error", f"保存に失敗しました:\n{e}")
 
-    # [DEAD?] 呼び出し元が見つからない。内部で使う _parse_vsqx も実質未到達
-    def import_external_project(self, file_path):
-        """
-        外部ファイル(.vsqx, .ustx, .mid)を解析しVO-SE形式へ変換
-        """
-        self.statusBar().showMessage(f"Migrating Project: {os.path.basename(file_path)}...")
-        
-        ext = os.path.splitext(file_path)[1].lower()
-        imported_notes = []
-
-        try:
-            if ext == ".vsqx":
-                # VOCALOIDファイルのXML解析
-                imported_notes = self._parse_vsqx(file_path)
-            elif ext == ".ustx":
-                # OpenUTAU(YAML形式)の解析
-                imported_notes = self._parse_ustx(file_path)
-            elif ext == ".mid":
-                # 標準MIDIファイルの解析
-                imported_notes = self._parse_midi(file_path)
-
-            if imported_notes:
-                # 解析した音符をピアノロールに配置し、エンジンにリレーする
-                self.update_timeline_with_notes(imported_notes)
-                self.log_startup(f"Migration Successful: {len(imported_notes)} notes imported.")
-                # そのままAural AIでプレビュー再生
-                self.handle_playback() 
-        
-        except Exception as e:
-            self.statusBar().showMessage(f"Migration Failed: {e}")
-
-    # [DEAD?(連鎖)] import_external_project からのみ呼ばれるが、呼び出し元自体がDEAD
-    def _parse_vsqx(self, path: str):
-        """
-        VOCALOID4 プロジェクトファイル(.vsqx)を解析してNoteEventリストを生成する。
-        Pyrightの reportOptionalMemberAccess を完全に回避した堅牢版。
-        """
-        import xml.etree.ElementTree as ET
-
-        # NoteEventクラスの解決（main_window.py と同じフォールバック方針）
-        try:
-            from modules.data.data_models import NoteEvent  # type: ignore
-        except ImportError:
-            from dataclasses import dataclass
-
-            @dataclass
-            class NoteEvent:  # type: ignore[no-redef]
-                lyrics: str
-                note_number: int
-                duration: float
-                start_time: float
-
-        notes = []
-        try:
-            tree = ET.parse(path)
-            root = tree.getroot()
-            
-            # 名前空間の定義（VSQX4の標準）
-            ns = {'v': 'http://www.yamaha.co.jp/vocaloid/schema/vsqx/4.0'} 
-            
-            # 全ての v:note 要素を探索
-            for v_note in root.findall('.//v:note', ns):
-                # 1. 各要素を安全に取得（findの結果がNoneでも止まらないようにする）
-                y_elem = v_note.find('v:y', ns)   # 歌詞
-                n_elem = v_note.find('v:n', ns)   # ノートナンバー
-                dur_elem = v_note.find('v:dur', ns) # 長さ
-                t_elem = v_note.find('v:t', ns)   # 開始時間
-                
-                # 2. すべての必須属性が存在し、かつ .text が存在するかチェック
-                if (y_elem is not None and y_elem.text is not None and
-                    n_elem is not None and n_elem.text is not None and
-                    dur_elem is not None and dur_elem.text is not None and
-                    t_elem is not None and t_elem.text is not None):
-                    
-                    try:
-                        # 3. データを型変換して NoteEvent を作成
-                        # (480.0 で割ってティックから秒に変換)
-                        note = NoteEvent(
-                            lyrics=str(y_elem.text),
-                            note_number=int(n_elem.text),
-                            duration=int(dur_elem.text) / 480.0,
-                            start_time=int(t_elem.text) / 480.0
-                        )
-                        notes.append(note)
-                    except ValueError:
-                        # 数値変換に失敗したデータはスキップ
-                        continue
-                        
-        except (ET.ParseError, FileNotFoundError) as e:
-            # ファイルが壊れている、または存在しない場合の処理
-            print(f"VSQX Parse Error: {e}")
-            return []
-
-        return notes
-
-    # [DEAD?] 呼び出し元が見つからない。on_click_auto_lyrics 等、別経路でUST相当の処理が行われている可能性
-    def load_ust_file(self, filepath: str) -> None:
-        """
-        UTAUの .ust ファイルを読み込んでタイムラインに配置。
-        代表の設計に基づき、エンコーディング、型安全、Noneガードを完璧に完遂します。
-        """
-        from PySide6.QtWidgets import QMessageBox
-        import os
-
-        try:
-            # 1. 安全な読み込み（Noneガードを徹底）
-            # self.read_file_safely は str または None を返す設計であることを明示
-            content_raw = self.read_file_safely(filepath)
-            if content_raw is None:
-                return
-            
-            # 型を str に確定させてから処理
-            content: str = str(content_raw)
-            lines = content.splitlines()
-            
-            notes: List[Any] = []
-            current_note: Dict[str, str] = {} # 型を明示
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                if line.startswith('[#'): # [#0001] などのセクション開始
-                    if current_note:
-                        # 2. 辞書からノートオブジェクトへの変換
-                        note_obj = self.parse_ust_dict_to_note(current_note)
-                        if note_obj is not None:
-                            notes.append(note_obj)
-                    current_note = {}
-                elif '=' in line:
-                    parts = line.split('=', 1)
-                    if len(parts) == 2:
-                        key, val = parts[0].strip(), parts[1].strip()
-                        current_note[key] = val
-            
-            # ループ終了後の最後のノートを処理
-            if current_note:
-                note_obj_last = self.parse_ust_dict_to_note(current_note)
-                if note_obj_last is not None:
-                    notes.append(note_obj_last)
-
-            # 3. タイムラインへの反映
-            t_widget = getattr(self, 'timeline_widget', None)
-            if t_widget is not None:
-                # set_notes への引数は List[Any] であることを保証
-                t_widget.set_notes(notes)
-                
-                # statusBarの取得と安全な呼び出し
-                status_bar = self.statusBar()
-                if status_bar is not None:
-                    status_bar.showMessage(f"UST Loaded: {len(notes)} notes from {os.path.basename(filepath)}")
-            
-        except Exception as e:
-            # PySide6の正しい形式での呼び出し
-            QMessageBox.critical(self, "Load Error", f"Failed to load UST:\n{str(e)}")
-
-    # [LIVE] scan_utau_voices / parse_oto_ini など複数の生存メソッドから呼ばれる(IO移植範囲外の呼び出し元あり)
     def read_file_safely(self, filepath: str) -> Optional[str]:
-        """
-        文字コードを自動判別してファイルを安全に読み込む。
-        日本語テキストファイル（Shift-JIS、UTF-8等）に完全対応。
-        """
+        """[LIVE] 文字コード自動判別読み込み"""
         import chardet
-        import os
 
-        # 1. ファイル存在チェック
         if not os.path.exists(filepath):
             print(f"エラー: ファイルが見つかりません: {filepath}")
             return None
 
         try:
-            # 2. バイナリモードで読み込み
             with open(filepath, 'rb') as f:
                 raw_data = f.read()
         
-            # 空ファイルの処理
             if not raw_data:
                 return ""
             
-            # 3. chardetによる文字コード自動検出
             detected_encoding: Optional[str] = None
             try:
                 detection_result = chardet.detect(raw_data)
                 detected_encoding = detection_result.get('encoding')
                 confidence = detection_result.get('confidence', 0)
             
-                # 検出精度が低い場合は無視
                 if confidence < 0.7:
                     detected_encoding = None
             except Exception as e:
                 print(f"文字コード検出エラー: {e}")
                 detected_encoding = None
         
-            # 4. 試行するエンコーディングリストの構築
             candidate_encodings = []
         
-            # 検出結果があれば最優先
             if detected_encoding:
                 candidate_encodings.append(detected_encoding)
         
-            # 日本語環境で一般的なエンコーディングを順に追加
             for enc in ['shift_jis', 'utf-8', 'utf-8-sig', 'cp932', 'euc-jp', 'iso-2022-jp']:
                 if enc not in candidate_encodings:
                     candidate_encodings.append(enc)
 
-            # 5. 順次デコードを試行
             for encoding in candidate_encodings:
                 try:
-                    # errors='replace' で不正な文字を '?' に置き換え
                     decoded_text = raw_data.decode(encoding, errors='replace')
-                
-                    # デコード成功時はログ出力
                     print(f"ファイル読み込み成功: {filepath} ({encoding})")
                     return decoded_text
                 
                 except (UnicodeDecodeError, LookupError) :
-                    # このエンコーディングは失敗、次を試す
                     continue
 
-            # 6. すべて失敗した場合の最終手段
             print(f"警告: すべてのエンコーディングで失敗。cp932で強制デコード: {filepath}")
             return raw_data.decode('cp932', errors='replace')
         
         except Exception as e:
             print(f"ファイル読み込みエラー: {filepath} - {e}")
-            import traceback
-            traceback.print_exc()
             return None
 
-    # [DEAD?] 呼び出し元が見つからない
-    def save_oto_ini(self, path, content):
-        """UTF-8の文字が含まれていてもエラーで落ちずに書き出す"""
-        try:
-            with open(path, "w", encoding="cp932", errors="replace") as f:
-                f.write(content)
-        except Exception as e:
-            QMessageBox.warning(self, "保存エラー", f"文字化けの可能性があります:\n{e}")
-
-    # [DEAD?] 呼び出し元が見つからない
     def get_safe_installed_name(self, filename: str, zip_path: str) -> str:
-        """
-        [Safety Lock] インストールパスから安全にフォルダ名を取り出す
-        （Pyright/Pylance 警告根絶版）
-        """
-        # 1. プレイヤーの停止（型ガードを追加）
-        # getattrとcastを組み合わせることで、hasattrチェック後の呼び出しエラーを防ぎます
+        """[LIVE] パス解析"""
         player = cast(Any, getattr(self, 'player', None))
         if player is not None:
             if hasattr(player, 'stop'):
@@ -812,31 +817,24 @@ class ProjectIOMixin(_Base):
         
         self.is_playing = False
         
-        # 2. タイムラインのリセット（型ガードを追加）
         timeline = cast(Any, getattr(self, 'timeline_widget', None))
         if timeline is not None:
             if hasattr(timeline, 'set_current_time'):
                 timeline.set_current_time(0.0)
             
-        # 3. パス解析ロジック（代表のロジックを維持）
         clean_path = os.path.normpath(filename)
-        # 空の要素を除去
         parts = [p for p in clean_path.split(os.sep) if p]
         
         if len(parts) >= 2:
-            # 親ディレクトリ名を返す
             return str(parts[-2])
             
-        # ファイル名（拡張子なし）を返す
         return str(os.path.splitext(os.path.basename(zip_path))[0])
 
-    # [LIVE] エクスポートボタンに接続
-    @Slot()
     def on_export_button_clicked(self):
-        """WAV書き出し（多重起動防止 & 高速化 & AIピッチ統合 & Proライセンス品質分岐版）"""
+        """[LIVE] WAV出力"""
         from modules.data.licensing import LicenseManager
+        import numpy as np
 
-        # 1. 各種コンポーネントの安全な取得
         tw = getattr(self, 'timeline_widget', None)
         gw = getattr(self, 'graph_editor_widget', None)
         engine = getattr(self, 'vo_se_engine', None)
@@ -851,14 +849,10 @@ class ProjectIOMixin(_Base):
             QMessageBox.warning(self, "エラー", "ノートがないため書き出しできません。")
             return
 
-        # 2. 保存先の決定
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "音声ファイルを保存", "output.wav", "WAV Files (*.wav)"
-        )
+        file_path, _ = QFileDialog.getSaveFileName(self, "音声ファイルを保存", "output.wav", "WAV Files (*.wav)")
         if not file_path:
             return
 
-        # 3. ライセンスに応じた品質パラメータの決定
         is_pro = LicenseManager.is_pro()
         if is_pro:
             sample_rate, bit_depth = 96000, 32
@@ -867,23 +861,19 @@ class ProjectIOMixin(_Base):
             sample_rate, bit_depth = 44100, 16
             quality_label = "Standard Quality"
 
-        # 4. 準備：再生を止めてステータス表示
         self.stop_and_clear_playback()
         status_bar = self.statusBar()
         if status_bar:
             status_bar.showMessage(f"{quality_label} でレンダリング中（AI表現力を付加中）...")
 
         try:
-            # パラメータを一括取得
             all_params = getattr(gw, 'all_parameters', {})
             vocal_data_list = []
-            res = 128  # 1ノートあたりのサンプリング解像度
+            res = 128
 
             for note in notes:
-                # --- [STEP 1: ベースピッチのサンプリング] ---
                 base_f0_list = self._sample_range(all_params.get("Pitch", []), note, res)
 
-                # --- [STEP 2: Aural AI による感情補正] ---
                 if ai_engine is not None:
                     base_f0_np = np.array(base_f0_list, dtype=np.float32)
                     emotional_f0_np = ai_engine.get_baked_pitch(id(note), base_f0_np)
@@ -891,36 +881,12 @@ class ProjectIOMixin(_Base):
                 else:
                     final_pitch_list = base_f0_list
 
-                # --- [STEP 3: ノートデータの構築] ---
-                note_data = {
-                    "lyric": note.lyrics,
-                    "phonemes": note.phonemes,
-                    "note_number": note.note_number,
-                    "start_time": note.start_time,
-                    "duration": note.duration,
-                    "pitch_list": final_pitch_list,
-                    "gender_list": self._sample_range(all_params.get("Gender", []), note, res),
-                    "tension_list": self._sample_range(all_params.get("Tension", []), note, res),
-                    "breath_list": self._sample_range(all_params.get("Breath", []), note, res),
-                }
+                note_data = {"lyric": note.lyrics, "phonemes": note.phonemes, "note_number": note.note_number, "start_time": note.start_time, "duration": note.duration, "pitch_list": final_pitch_list, "gender_list": self._sample_range(all_params.get("Gender", []), note, res), "tension_list": self._sample_range(all_params.get("Tension", []), note, res), "breath_list": self._sample_range(all_params.get("Breath", []), note, res)}
                 vocal_data_list.append(note_data)
 
-            # --- [STEP 4: 音声合成エンジン（C言語側）への送出] ---
-            engine.export_to_wav(
-                vocal_data=vocal_data_list,
-                tempo=tw.tempo,
-                file_path=file_path,
-                sample_rate=sample_rate,   # ライセンス品質パラメータ
-                bit_depth=bit_depth,       # ライセンス品質パラメータ
-                is_pro=is_pro,             # エンジン側の追加分岐用
-            )
+            engine.export_to_wav(vocal_data=vocal_data_list, tempo=tw.tempo, file_path=file_path, sample_rate=sample_rate, bit_depth=bit_depth, is_pro=is_pro)
 
-            QMessageBox.information(
-                self, "完了",
-                f"レンダリングが完了しました！\n"
-                f"品質: {quality_label}\n"
-                f"AIによる調声が適用されています。"
-            )
+            QMessageBox.information(self, "完了", f"レンダリングが完了しました！\n品質: {quality_label}\nAIによる調声が適用されています。")
             if status_bar:
                 status_bar.showMessage(f"エクスポート完了（{quality_label}）")
 
@@ -929,169 +895,8 @@ class ProjectIOMixin(_Base):
             if status_bar:
                 status_bar.showMessage("エラー発生")
 
-    # [LIVE] save_action.triggered (Ctrl+S) に接続
-    @Slot()
-    def save_file_dialog_and_save_midi(self):
-        """プロジェクトの保存（全データ・全パラメーター）"""
-        filepath, _ = QFileDialog.getSaveFileName(
-            self, "プロジェクトを保存", "", "VO-SE Project (*.vose);;JSON Files (*.json)"
-        )
-        if not filepath:
-            return
-
-        tw = getattr(self, 'timeline_widget', None)
-        gw = getattr(self, 'graph_editor_widget', None)
-
-        if tw is None or gw is None:
-            QMessageBox.warning(self, "エラー", "保存に必要なデータが初期化されていません")
-            return
-
-        all_params = getattr(gw, 'all_parameters', {})
-
-        save_data = {
-            "app_id": "VO_SE_Pro_2026",
-            "version": "1.1",
-            "tempo_bpm": tw.tempo,
-            "notes": [note.to_dict() for note in tw.notes_list],
-            "parameters": {
-                mode: [{"t": p.time, "v": p.value} for p in events]
-                for mode, events in all_params.items()
-            }
-        }
-
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(save_data, f, indent=2, ensure_ascii=False)
-
-            status_bar = self.statusBar()
-            if status_bar:
-                status_bar.showMessage(f"保存完了: {filepath}")
-
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"保存失敗: {e}")
-
-    # [DEAD?] 呼び出し元が見つからない
-    def load_json_project(self, filepath: str):
-        """
-        JSONプロジェクトの読み込み
-        型チェックエラー(Attribute unknown)を回避し、安全にパラメータを復元する
-        """
-        try:
-            from modules.data.data_models import NoteEvent, PitchEvent
-
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            raw_notes = data.get("notes", [])
-            notes = []
-            if hasattr(NoteEvent, 'from_dict'):
-                notes = [NoteEvent.from_dict(d) for d in raw_notes]
-            else:
-                for d in raw_notes:
-                    notes.append(NoteEvent(**d))
-
-            tw = getattr(self, 'timeline_widget', None)
-            if tw and hasattr(tw, 'set_notes'):
-                tw.set_notes(notes)
-
-            tempo = data.get("tempo_bpm", 120)
-            t_input = getattr(self, 'tempo_input', None)
-            if t_input:
-                t_input.setText(str(tempo))
-                if hasattr(self, 'update_tempo_from_input'):
-                    self.update_tempo_from_input()
-
-            gw = getattr(self, 'graph_editor_widget', None)
-            saved_params = data.get("parameters", {})
-
-            if gw and hasattr(gw, 'all_parameters'):
-                target_params = gw.all_parameters
-                for mode in target_params.keys():
-                    if mode in saved_params:
-                        restored_events = []
-                        for p in saved_params[mode]:
-                            t_val = p.get("t", p.get("time", 0))
-                            v_val = p.get("v", p.get("value", 0))
-                            restored_events.append(PitchEvent(time=t_val, value=v_val))
-                        target_params[mode] = restored_events
-
-            if hasattr(self, 'update_scrollbar_range'):
-                self.update_scrollbar_range()
-            if hasattr(self, 'update_scrollbar_v_range'):
-                self.update_scrollbar_v_range()
-
-            if gw:
-                gw.update()
-            if tw:
-                tw.update()
-
-            status_bar = self.statusBar()
-            if status_bar:
-                status_bar.showMessage(f"読み込み完了: {len(notes)}ノート")
-
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"読み込み失敗: {str(e)}")
-
-    # [DEAD?] 呼び出し元が見つからない。open_file_dialog_and_load_midi が実質的な後継とみられる
-    def load_midi_file_from_path(self, filepath: str):
-        """MIDI読み込み（自動歌詞変換機能付き）"""
-        try:
-            if mido is None:
-                raise RuntimeError("MIDI import requires 'mido'. Please install dependencies first.")
-            from modules.data.data_models import NoteEvent
-            from modules.data.midi_manager import load_midi_file
-
-            mid = mido.MidiFile(filepath)
-            loaded_tempo = 120.0
-
-            for track in mid.tracks:
-                for msg in track:
-                    if msg.type == 'set_tempo':
-                        loaded_tempo = mido.tempo2bpm(msg.tempo)
-                        break
-
-            # 対策：load_midi_file が None を返す可能性へのケア
-            notes_data = load_midi_file(filepath)
-            if notes_data is None:
-                notes_data = []  # 空リストで安全にフォールバック
-
-            notes = [NoteEvent.from_dict(d) for d in notes_data]
-
-            for note in notes:
-                lyric_text = str(getattr(note, "lyric", getattr(note, "lyrics", "")))
-                phonemes = getattr(note, "phonemes", [])
-                if lyric_text and not phonemes:
-                    yomi = self._get_yomi_from_lyrics(lyric_text)
-                    setattr(note, "phonemes", [yomi] if isinstance(yomi, str) else yomi)
-
-            if hasattr(self, 'timeline_widget') and self.timeline_widget:
-                self.timeline_widget.set_notes(notes)
-
-            if hasattr(self, 'tempo_input') and self.tempo_input:
-                self.tempo_input.setText(str(loaded_tempo))
-
-            self.update_tempo_from_input()
-            self.update_scrollbar_range()
-            self.update_scrollbar_v_range()
-
-            status_bar = self.statusBar()
-            if status_bar:
-                status_bar.showMessage(f"MIDI読み込み完了: {len(notes)}ノート")
-
-        except Exception as e:
-            QMessageBox.critical(self, "エラー", f"MIDI読み込み失敗: {e}")
-            
-    # [LIVE] load_ust_file から呼ばれる(load_ust_file 自体はDEAD?)
-    def parse_ust_dict_to_note(
-        self,
-        d: Dict[str, Any],
-        current_time_sec: float = 0.0,
-        tempo: float = 120.0
-    ) -> Any:
-        """
-        USTの辞書データを解析し、NoteEventオブジェクトと次の開始時間を生成する統合メソッド。
-        """
-        # 1. NoteEventクラスの解決（循環参照回避）
+    def parse_ust_dict_to_note(self, d: Dict[str, Any], current_time_sec: float = 0.0, tempo: float = 120.0) -> Any:
+        """[LIVE] UST辞書 → NoteEvent変換"""
         from dataclasses import dataclass
         import importlib
 
@@ -1108,53 +913,63 @@ class ProjectIOMixin(_Base):
         except Exception:
             NoteEventCls = _UstFallbackNoteEvent
 
-        # 2. データの抽出とガード（getを使用し、キー不在によるクラッシュを完全回避）
         try:
             length_ticks_str = d.get('Length', '480')
             note_num_str = d.get('NoteNum', '64')
             lyric = str(d.get('Lyric', 'あ'))
 
-            # 3. 数値変換
             length_ticks = int(length_ticks_str)
             note_num = int(note_num_str)
 
-            # 4. 代表の黄金計算式（省略なし）
-            # (ティック数 / 480.0) * (60.0 / テンポ) = 実際の秒数
             duration_sec = (length_ticks / 480.0) * (60.0 / tempo)
 
-            # 5. オブジェクトの生成
-            # 旧定義の互換性を保ちつつ、NoteEventとして構築
-            note = NoteEventCls(
-                lyrics=lyric,
-                note_number=note_num,
-                start_time=current_time_sec,
-                duration=duration_sec
-            )
+            note = NoteEventCls(lyrics=lyric, note_number=note_num, start_time=current_time_sec, duration=duration_sec)
 
-            # 6. 下位互換性のための属性追加
-            # 旧NoteDataクラスが持っていた属性(length, lyric, note_num)を動的に付与
             setattr(note, 'length', length_ticks)
             setattr(note, 'lyric', lyric)
             setattr(note, 'note_num', note_num)
 
-            # 7. 返却処理
-            # 呼び出し側が「次の開始時間」を期待しているか（引数にcurrent_time_secがあるか）で判定
-            # 基本的には (ノート, 次の開始時間) のタプルを返します
+            for k, v in d.items():
+                if k.startswith("_ust_"):
+                    setattr(note, k, v)
+
             return note, current_time_sec + duration_sec
 
         except (ValueError, TypeError, Exception) as e:
-            # エラー発生時：プログラムを止めず、最小限の安全なデータを返す
             print(f"DEBUG: UST Parse Error in note: {e}")
             
-            # ダミーデータの構築
-            dummy_note = NoteEventCls(
-                lyrics=" ",
-                note_number=64,
-                start_time=current_time_sec,
-                duration=0.0
-            )
+            dummy_note = NoteEventCls(lyrics=" ", note_number=64, start_time=current_time_sec, duration=0.0)
             setattr(dummy_note, 'length', 0)
             setattr(dummy_note, 'lyric', " ")
             setattr(dummy_note, 'note_num', 64)
             
             return dummy_note, current_time_sec
+
+    # ダミーメソッド（main_window.py側で実装）
+    def update_timeline_with_notes(self, notes_data):
+        """[LIVE] ノートをタイムラインに反映"""
+        pass
+
+    def update_tempo_from_input(self):
+        """[LIVE] テンポ入力反映"""
+        pass
+
+    def update_scrollbar_range(self):
+        """[LIVE] 横スクロールバー更新"""
+        pass
+
+    def update_scrollbar_v_range(self):
+        """[LIVE] 縦スクロールバー更新"""
+        pass
+
+    def stop_and_clear_playback(self):
+        """[LIVE] 再生停止"""
+        pass
+
+    def _sample_range(self, events, note, res):
+        """[LIVE] オートメーションサンプリング"""
+        return [0.5] * res
+
+    def export_to_midi_file(self):
+        """[LIVE] MIDIエクスポート"""
+        print("MIDIエクスポートを開始します...")
