@@ -15,28 +15,31 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from modules.data.data_models import NoteEvent
 from modules.data.ust_parser import UstParser, UstConverter
 
-if TYPE_CHECKING:
-    from modules.gui.main_window import MainWindow
-
 logger = logging.getLogger(__name__)
 
+# UST 書き出し時のデフォルト解像度 (ticks/beat)
 _TICKS_PER_BEAT = 480
 
 
 class ProjectIOMixin:
+    """
+    MainWindow に mix-in して使うファイル入出力クラス。
+    self は MainWindow インスタンスとして扱われるが、
+    型チェックの複雑さを避けるため self: Any でアノテートする。
+    """
 
     # ------------------------------------------------------------------
     # UST 読み込み
     # ------------------------------------------------------------------
 
-    def load_ust_file(self: "MainWindow", file_path: str) -> bool:
+    def load_ust_file(self: Any, file_path: str) -> bool:
         """
         .ust ファイルをネイティブパーサーで読み込み、
         タイムラインに反映する。
@@ -115,7 +118,7 @@ class ProjectIOMixin:
     # 外部プロジェクト読み込みのディスパッチャー
     # ------------------------------------------------------------------
 
-    def import_external_project(self) -> None:
+    def import_external_project(self: Any) -> None:
         """
         ファイルダイアログを開き、拡張子に応じて適切なローダーを呼び出す。
         対応形式: .ust, .vsqx, .mid, .json
@@ -151,7 +154,7 @@ class ProjectIOMixin:
     # UST 書き出し
     # ------------------------------------------------------------------
 
-    def export_as_ust(self) -> None:
+    def export_as_ust(self: Any) -> None:
         """
         現在のプロジェクトを .ust 形式で書き出す。
         ビブラート・強度・フラグは NoteEvent の _ust_* 拡張フィールドから復元する。
@@ -262,7 +265,7 @@ class ProjectIOMixin:
     # JSON プロジェクト保存・読み込み (従来通り)
     # ------------------------------------------------------------------
 
-    def save_file_dialog_and_save_midi(self) -> None:
+    def save_file_dialog_and_save_midi(self: Any) -> None:
         """プロジェクトを JSON で保存するダイアログを表示する"""
         if not hasattr(self, "timeline_widget") or self.timeline_widget is None:
             return
@@ -291,7 +294,7 @@ class ProjectIOMixin:
             logger.exception("JSON 保存エラー: %s", exc)
             QMessageBox.critical(self, "保存エラー", f"保存に失敗しました:\n{exc}")
 
-    def load_json_project(self, file_path: str) -> bool:
+    def load_json_project(self: Any, file_path: str) -> bool:
         """JSON プロジェクトを読み込む"""
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -322,7 +325,7 @@ class ProjectIOMixin:
             QMessageBox.critical(self, "読み込みエラー", f"JSON の読み込みに失敗しました:\n{exc}")
             return False
 
-    def load_midi_file_from_path(self: "MainWindow", file_path: str) -> bool:
+    def load_midi_file_from_path(self: Any, file_path: str) -> bool:
         """MIDI ファイルを読み込んでタイムラインに設定する"""
         from modules.data.midi_manager import load_midi_file
 
@@ -347,10 +350,10 @@ class ProjectIOMixin:
         return True
 
     # ------------------------------------------------------------------
-    # 内部: 未実装形式
+    # 内部: .vsqx 読み込み (現状は未実装)
     # ------------------------------------------------------------------
 
-    def _load_vsqx(self, file_path: str) -> None:
+    def _load_vsqx(self: Any, file_path: str) -> None:
         """Vocaloid .vsqx 読み込み (未実装 — プレースホルダー)"""
         QMessageBox.information(
             self,
@@ -359,7 +362,7 @@ class ProjectIOMixin:
         )
 
     # oto.ini 書き出し（AutoOtoEngine の結果を保存する用途）
-    def save_oto_ini(self, voice_dir: str, oto_data: List[Dict[str, Any]]) -> bool:
+    def save_oto_ini(self: Any, voice_dir: str, oto_data: List[Dict[str, Any]]) -> bool:
         """
         oto.ini を Shift-JIS で書き出す。
 
@@ -397,7 +400,7 @@ class ProjectIOMixin:
     # 【従来実装】音源インポート・oto.ini 生成
     # ======================================================================
 
-    def import_voice_bank(self, zip_path: str):
+    def import_voice_bank(self: Any, zip_path: str):
         """[LIVE] ZIP音源インストール完全版"""
         import shutil
         import zipfile
@@ -515,7 +518,7 @@ class ProjectIOMixin:
         except Exception as e:
             QMessageBox.critical(self, "導入エラー", f"インストール中にエラーが発生しました:\n{str(e)}")
 
-    def generate_and_save_oto(self, target_voice_dir):
+    def generate_and_save_oto(self: Any, target_voice_dir):
         """[LIVE] WAV解析 → oto.ini生成"""
         from modules.gui.main_window import AutoOtoEngine
         
@@ -550,14 +553,14 @@ class ProjectIOMixin:
     # 【従来実装】ドラッグ&ドロップ
     # ======================================================================
 
-    def dragEnterEvent(self, event):
+    def dragEnterEvent(self: Any, event):
         """[LIVE] ドラッグ受け入れ判定"""
         if event.mimeData().hasUrls():
             event.accept()
         else:
             event.ignore()
 
-    def dropEvent(self, event):
+    def dropEvent(self: Any, event):
         """[LIVE] ファイルドロップ処理"""
         from urllib.parse import urlparse
         from urllib.request import urlretrieve
@@ -630,7 +633,7 @@ class ProjectIOMixin:
     # 【従来実装】その他メソッド
     # ======================================================================
 
-    def load_file_from_path(self, filepath: str):
+    def load_file_from_path(self: Any, filepath: str):
         """[LIVE] ファイル自動判別読み込み"""
         if filepath.endswith('.mid') or filepath.endswith('.midi'):
             self._parse_midi(filepath)
@@ -638,22 +641,18 @@ class ProjectIOMixin:
             self._parse_ustx(filepath)
         print(f"ファイルを読み込みました: {filepath}")
 
-    def _parse_midi(self, filepath: str):
+    def _parse_midi(self: Any, filepath: str):
         """[LIVE] MIDI解析"""
         from modules.data.midi_manager import load_midi_file
         notes_data = load_midi_file(filepath)
         if notes_data:
             self.update_timeline_with_notes(notes_data)
 
-    def _parse_ustx(self, filepath: str):
+    def _parse_ustx(self: Any, filepath: str):
         """[LIVE] USTX解析（将来拡張用）"""
         print(f"USTX解析は現在開発中です: {filepath}")
 
-    def _load_vsqx(self, filepath: str):
-        """[LIVE] VSQX読み込み（未実装）"""
-        QMessageBox.information(self, "未対応形式", ".vsqx の読み込みは現在未実装です。\nUST または JSON 形式をお使いください。")
-
-    def save_project(self):
+    def save_project(self: Any):
         """[LIVE] .vose形式保存"""
         path, _ = QFileDialog.getSaveFileName(self, "保存", "", "VO-SE Project (*.vose)")
         if not path: 
@@ -674,7 +673,7 @@ class ProjectIOMixin:
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Save Failed: {e}")
 
-    def on_save_project_clicked(self) -> None:
+    def on_save_project_clicked(self: Any) -> None:
         """[LIVE] プロジェクト保存"""
         file_path, _ = QFileDialog.getSaveFileName(self, "プロジェクトを保存", "", "VO-SE Project (*.vose);;JSON Files (*.json);;All Files (*)")
         if not file_path:
@@ -698,7 +697,7 @@ class ProjectIOMixin:
         except Exception as e:
             QMessageBox.critical(self, "保存エラー", f"プロジェクトの保存に失敗しました:\n{str(e)}")
 
-    def open_file_dialog_and_load_midi(self) -> None:
+    def open_file_dialog_and_load_midi(self: Any) -> None:
         """[LIVE] MIDI読み込みダイアログ"""
         file_path, _ = QFileDialog.getOpenFileName(self, "MIDIファイルを開く", "", "MIDI Files (*.mid *.midi);;All Files (*)")
         if not file_path:
@@ -721,7 +720,7 @@ class ProjectIOMixin:
         except Exception as e:
             QMessageBox.critical(self, "MIDIエラー", f"MIDIの読み込み中にエラーが発生しました:\n{str(e)}")
 
-    def export_analysis_to_oto_ini(self):
+    def export_analysis_to_oto_ini(self: Any):
         """[LIVE] 解析結果 → oto.ini"""
         import shutil
         target_dir = self.voice_manager.get_current_voice_path()
@@ -752,7 +751,7 @@ class ProjectIOMixin:
         except Exception as e:
             QMessageBox.critical(self, "Write Error", f"保存に失敗しました:\n{e}")
 
-    def read_file_safely(self, filepath: str) -> Optional[str]:
+    def read_file_safely(self: Any, filepath: str) -> Optional[str]:
         """[LIVE] 文字コード自動判別読み込み"""
         import chardet
 
@@ -804,7 +803,7 @@ class ProjectIOMixin:
             print(f"ファイル読み込みエラー: {filepath} - {e}")
             return None
 
-    def get_safe_installed_name(self, filename: str, zip_path: str) -> str:
+    def get_safe_installed_name(self: Any, filename: str, zip_path: str) -> str:
         """[LIVE] パス解析"""
         player = cast(Any, getattr(self, 'player', None))
         if player is not None:
@@ -826,7 +825,7 @@ class ProjectIOMixin:
             
         return str(os.path.splitext(os.path.basename(zip_path))[0])
 
-    def on_export_button_clicked(self):
+    def on_export_button_clicked(self: Any):
         """[LIVE] WAV出力"""
         from modules.data.licensing import LicenseManager
         import numpy as np
@@ -891,7 +890,7 @@ class ProjectIOMixin:
             if status_bar:
                 status_bar.showMessage("エラー発生")
 
-    def parse_ust_dict_to_note(self, d: Dict[str, Any], current_time_sec: float = 0.0, tempo: float = 120.0) -> Any:
+    def parse_ust_dict_to_note(self: Any, d: Dict[str, Any], current_time_sec: float = 0.0, tempo: float = 120.0) -> Any:
         """[LIVE] UST辞書 → NoteEvent変換"""
         from dataclasses import dataclass
         import importlib
@@ -942,35 +941,35 @@ class ProjectIOMixin:
             return dummy_note, current_time_sec
 
     # ダミーメソッド（main_window.py側で実装）
-    def update_timeline_with_notes(self, notes_data):
+    def update_timeline_with_notes(self: Any, notes_data):
         """[LIVE] ノートをタイムラインに反映"""
         pass
 
-    def update_tempo_from_input(self):
+    def update_tempo_from_input(self: Any):
         """[LIVE] テンポ入力反映"""
         pass
 
-    def update_scrollbar_range(self):
+    def update_scrollbar_range(self: Any):
         """[LIVE] 横スクロールバー更新"""
         pass
 
-    def update_scrollbar_v_range(self):
+    def update_scrollbar_v_range(self: Any):
         """[LIVE] 縦スクロールバー更新"""
         pass
 
-    def stop_and_clear_playback(self):
+    def stop_and_clear_playback(self: Any):
         """[LIVE] 再生停止"""
         pass
 
-    def _sample_range(self, events, note, res):
+    def _sample_range(self: Any, events, note, res):
         """[LIVE] オートメーションサンプリング"""
         return [0.5] * res
 
-    def export_to_midi_file(self):
+    def export_to_midi_file(self: Any):
         """[LIVE] MIDIエクスポート"""
         print("MIDIエクスポートを開始します...")
 
-    def _get_yomi_from_lyrics(self, lyrics: str) -> str:
+    def _get_yomi_from_lyrics(self: Any, lyrics: str) -> str:
         """[LIVE] 歌詞（漢字・かな混じり）を平仮名に変換する"""
         if not lyrics:
             return ""
