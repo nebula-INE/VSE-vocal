@@ -1017,18 +1017,29 @@ void synthesize_note_impl(const SynthNoteParams& p, std::vector<double>& note_bu
         const double t_out_ms = j * kFramePeriod;
         const double t_src_ms = map_time(t_out_ms, current_oto, src_ms, note_ms);
         const int src_frame   = clamp(
-            static_cast<int>(t_src_ms / kFramePeriod), 0, cache_cur->length-1);
+            static_cast<int>(t_src_ms / kFramePeriod), 0, cache_cur->length - 1);
 
         double* sr = tl_scratch.spec_ptrs[j];
-        double* ar = tl_scratch.ap_ptrs  [j];
-        std::copy_n(&cache_cur->flat_spec[static_cast<size_t>(src_frame)*spec_bins],
+        double* ar = tl_scratch.ap_ptrs[j];
+        std::copy_n(&cache_cur->flat_spec[static_cast<size_t>(src_frame) * spec_bins],
                     spec_bins, sr);
-        std::copy_n(&cache_cur->flat_ap  [static_cast<size_t>(src_frame)*spec_bins],
+        std::copy_n(&cache_cur->flat_ap[static_cast<size_t>(src_frame) * spec_bins],
                     spec_bins, ar);
 
-        tl_scratch.f0[j] = n.pitch_curve
+        // ---- 1. ベースF0を計算 ----
+        double base_f0_val = n.pitch_curve
             ? resample_curve(n.pitch_curve, n.pitch_length, j, output_frames)
             : 440.0;
+
+        // ---- 2. ★★★ ポルタメントオフセットを適用（セント → Hz） ★★★ ----
+        if (n.portamento_offsets && n.portamento_length > 0 && j < n.portamento_length) {
+            double cents = resample_curve(n.portamento_offsets, n.portamento_length, j, output_frames);
+            base_f0_val *= std::pow(2.0, cents / 1200.0);
+        }
+
+        tl_scratch.f0[j] = base_f0_val;   // ← ここで確定
+
+        // ---- 3. その他のパラメータ ----
         const double gender  = n.gender_curve
             ? resample_curve(n.gender_curve,  n.pitch_length, j, output_frames) : 0.5;
         const double tension = n.tension_curve
@@ -1036,13 +1047,11 @@ void synthesize_note_impl(const SynthNoteParams& p, std::vector<double>& note_bu
         const double breath  = n.breath_curve
             ? resample_curve(n.breath_curve,  n.pitch_length, j, output_frames) : 0.5;
 
-        // フォルマント追従: 現フレームF0 / 音源基準F0 を渡す
-        // 高音域ほど > 1.0 になり、スペクトル包絡が引き伸ばされて声がこもらない
+        // ---- 4. フォルマント追従（ポルタメント適用後のF0を使用） ----
         const double f0_ratio = (base_f0 > 0.0) ? tl_scratch.f0[j] / base_f0 : 1.0;
         apply_gender_shift(sr, spec_bins, gender, tl_scratch.spec_tmp.data(), f0_ratio);
         apply_tension_breath(sr, ar, spec_bins, tension, breath);
     }
-
     // ----------------------------------------------------------------
     // ステップ2: prev スペクトルを scratch_prev に展開してブレンド
     // (cur が書き終わった後でないと blend の cur 側がゼロになる)
