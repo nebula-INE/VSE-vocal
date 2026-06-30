@@ -163,75 +163,57 @@ struct AnalysisCache;
 
 static constexpr size_t kMaxCacheEntries = 64; // 約1GB上限（16MB × 64）
 
-struct CacheStore {
+class CacheStore {
     using Key   = std::string;
     using Value = std::shared_ptr<const AnalysisCache>;
 
 private:
-    // アクセス順リスト（先頭=最近使用）
+    mutable std::shared_mutex mtx;   // ← shared_mutex に変更
     std::list<std::pair<Key, Value>> lru_list;
-    // キー → リストイテレータ
     std::unordered_map<Key, std::list<std::pair<Key, Value>>::iterator> index;
-    
-    // 内部にミューテックスを隠蔽し、スレッド安全性を保証
-    mutable std::mutex mtx; 
 
 public:
-    // キャッシュに追加または更新
-    void put(const Key& key, const Value& val) {
-        std::lock_guard<std::mutex> lock(mtx); // 関数を抜ける時に自動アンロック
+    // 読み取り（共有ロック＋MRU移動）
+    Value get(const Key& key) {
+        std::unique_lock<std::shared_mutex> lock(mtx);  // splice は変更操作のため排他ロック
+        auto it = index.find(key);
+        if (it == index.end()) return nullptr;
+        lru_list.splice(lru_list.begin(), lru_list, it->second);
+        return it->second->second;
+    }
 
+    // 書き込み（排他ロック）
+    void put(const Key& key, const Value& val) {
+        std::unique_lock<std::shared_mutex> lock(mtx);
         auto it = index.find(key);
         if (it != index.end()) {
             lru_list.erase(it->second);
             index.erase(it);
         }
-        
         lru_list.push_front({key, val});
         index[key] = lru_list.begin();
 
-        // キャッシュ溢れ時の追い出し処理（バグ修正版）
         while (index.size() > kMaxCacheEntries) {
-            // 参照ではなく、値を完全にコピーしてローカルに退避させる
-            const Key old_key = lru_list.back().first; 
-            
-            index.erase(old_key);
-            lru_list.pop_back(); // ここでリストから消えても old_key は生きているので安全
+            auto last = std::prev(lru_list.end());
+            index.erase(last->first);
+            lru_list.pop_back();
         }
     }
 
-    // キャッシュから取得（ヒット時はアクセス順を更新）
-    Value get(const Key& key) {
-        std::lock_guard<std::mutex> lock(mtx);
-
-        auto it = index.find(key);
-        if (it == index.end()) return nullptr;
-        
-        // ヒットしたエントリをリストの先頭（MRU）へ移動
-        lru_list.splice(lru_list.begin(), lru_list, it->second);
-        
-        return it->second->second;
-    }
-
-    // キー削除（ボイス再ロード時など）
     void erase(const Key& key) {
-        std::lock_guard<std::mutex> lock(mtx);
-
+        std::unique_lock<std::shared_mutex> lock(mtx);
         auto it = index.find(key);
         if (it == index.end()) return;
-        
         lru_list.erase(it->second);
         index.erase(it);
     }
 
-    // デバッグ・統計用：現在のキャッシュエントリ数を安全に取得
     size_t size() const {
-        std::lock_guard<std::mutex> lock(mtx);
+        std::shared_lock<std::shared_mutex> lock(mtx);
         return index.size();
     }
 };
 
-// グローバルインスタンス（内部でロックされるため、外部での個別ミューテックス制御は不要になります）
 static CacheStore g_analysis_cache;
 static std::mutex g_analysis_cache_mutex;
 
