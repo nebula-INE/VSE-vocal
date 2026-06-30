@@ -51,13 +51,14 @@ struct NoteEvent {
     double* tension_curve;
     double* breath_curve;
 
-    // ビブラート制御カーブ（nullptr = デフォルト動作）
-    // depth_curve[i] ∈ [0.0, 1.0]  0=無振動, 1=±15cent フルデプス
-    // rate_curve[i]  ∈ [Hz]        典型値 4〜8Hz（0=6Hzデフォルト）
-    // (これらもすべて 8バイトポインタ、intで完全にアライメントが詰まっています)
+    // ビブラート制御カーブ
     double* vibrato_depth_curve;
     double* vibrato_rate_curve;
-    int     vibrato_curve_length;  // depth/rate カーブ共通の長さ
+    int     vibrato_curve_length;
+
+    // ★↓↓↓ ここから新規追加（必ず末尾に配置） ↓↓↓★
+    double* portamento_offsets;   // 各フレームのピッチオフセット（セント単位）
+    int     portamento_length;    // pitch_length と同じか、0なら無効
 };
 #pragma pack(pop)
 
