@@ -551,57 +551,28 @@ get_or_analyze(std::shared_ptr<const EmbeddedVoice> ev_sp, int fft_size, int spe
     if (!ev_sp) return nullptr;
     const std::string& key = ev_sp->path;
 
-    // 1. メモリキャッシュ（LRU）のファーストチェック
+    // 1. メモリキャッシュをチェック（CacheStore 内部でロック）
     {
-        VoseUniqueLock rlock(g_analysis_cache_mutex);
         auto cached = g_analysis_cache.get(key);
         if (cached) return cached;
     }
 
-    // 2. ロックを外した状態でディスクキャッシュのパス生成と読み込み（I/Oボトルネックの分離）
-    const std::string h_str      = generate_cache_hash(key);
-    const std::string cache_file = get_cache_dir() + "/" + h_str + ".vsc";
+    // 2. ディスクキャッシュ読み込み（ロック外）
+    const std::string cache_file = get_cache_dir() + "/" + generate_cache_hash(key) + ".vsc";
     auto disk_cache = load_cache(cache_file, spec_bins);
-
-    // 3. 書き込みロックを取得して状態を確定させる
-    VoseUniqueLock wlock(g_analysis_cache_mutex);
-
-    // 【Double-Checked Locking】ディスク読み込みやロック待ちの間に、
-    // 他のスレッドが既にメモリキャッシュに格納していないかを「必ず再確認」
-    auto cached = g_analysis_cache.get(key);
-    if (cached) {
-        // wlock はスコープを抜ける（関数の波括弧を閉じる）時に自動的に安全に解放されます
-        return cached; 
-    }
-
-    // ディスクキャッシュが有効だった場合、LRUに登録して返す
     if (disk_cache) {
         g_analysis_cache.put(key, disk_cache);
         return disk_cache;
     }
 
-    // 4. キャッシュがどこにもない場合のみ、WORLDで新規解析を実行
-    // ロックを持ったまま解析すると全スレッドが止まるため、一時的にロックを解除（重要）
-    wlock.unlock();
+    // 3. 新規解析（ロック外、重い処理）
     auto cache = build_analysis_cache(*ev_sp, fft_size, spec_bins);
-    wlock.lock(); // メモリキャッシュへ書き込むために再ロック
 
-    // 解析中に別のスレッドが同じファイルを解析し終えていないか、最終防衛ラインのチェック
-    auto final_cached = g_analysis_cache.get(key);
-    if (final_cached) {
-        return final_cached;
-    }
-
-    // メモリキャッシュに格納
+    // 4. メモリキャッシュに書き込み
     g_analysis_cache.put(key, cache);
-    
-    // ディスクへの書き込みは重いため、ロックを完全に解除してから非同期（または安全なスコープ）で行う
-    wlock.unlock();
-    save_cache(cache_file, *cache);
-
+    save_cache(cache_file, *cache);  // ディスク保存（ロック外でOK）
     return cache;
 }
-
 // ============================================================
 // UTAUタイムマッピング
 // ============================================================
