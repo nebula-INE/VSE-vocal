@@ -1,6 +1,6 @@
 # modules/audio/vo_se_engine_patch.py
 """
-VO-SE Vocal — vo_se_engine.py への差分パッチ
+VO-SE Vocal — vo_se_engine.py への差分パッチ（ポルタメント対応版）
 
 このファイルは vo_se_engine.py の VO_SE_Engine クラスに対して
 モンキーパッチを当てる形で優先度1〜2の機能を追加する。
@@ -11,11 +11,13 @@ VO-SE Vocal — vo_se_engine.py への差分パッチ
   [NEW-1] VO_SE_Engine.refresh_voice_library_v2()
           → VcvResolver を初期化し、音源ロード時に VCV 対応フラグをセットする
   [NEW-2] VO_SE_Engine.export_to_wav_v2()
-          → VcvResolver を通じた VCV 解決 + UST vibrato カーブの注入
+          → VcvResolver を通じた VCV 解決 + UST vibrato カーブ + **ポルタメントカーブ** の注入
   [NEW-3] VO_SE_Engine._build_vibrato_curves()
           → UstNote の VBR パラメーターから depth/rate カーブを生成
   [NEW-4] VO_SE_Engine.load_ust_project()
           → UST ファイルを UstParser で読み込み、notes_list に変換して返す
+  [NEW-5] VO_SE_Engine._build_portamento_curve()   ★新規
+          → UST の PBS/PBW/PBY からピッチオフセットカーブ（セント単位）を生成
 """
 from __future__ import annotations
 
@@ -93,6 +95,63 @@ def build_vibrato_curves(
 
 
 # ---------------------------------------------------------------------------
+# ★新規：ポルタメントカーブビルダー
+# ---------------------------------------------------------------------------
+
+def build_portamento_curve(
+    ust_note: Any,
+    resolution: int = 128,
+) -> Optional[np.ndarray]:
+    """
+    UST ノートオブジェクト（_ust_pbs, _ust_pbw, _ust_pby 属性を持つ）から
+    ピッチオフセットカーブ（セント単位）を生成する。
+
+    Args:
+        ust_note:   UstNote またはそれに準ずるオブジェクト（dict でも可）
+        resolution: カーブのサンプル数（NoteEvent の pitch_length と一致させる）
+
+    Returns:
+        長さ resolution の float64 配列、またはポルタメント情報がない場合は None
+    """
+    # 辞書対応（UstConverter が返す dict にも対応）
+    if isinstance(ust_note, dict):
+        pbs = ust_note.get("_ust_pbs", "")
+        pbw = ust_note.get("_ust_pbw", "")
+        pby = ust_note.get("_ust_pby", "")
+    else:
+        pbs = getattr(ust_note, "_ust_pbs", "")
+        pbw = getattr(ust_note, "_ust_pbw", "")
+        pby = getattr(ust_note, "_ust_pby", "")
+
+    if not pbw:  # PBW がなければポルタメントなし
+        return None
+
+    # UstConverter の静的メソッドを使ってカーブ生成
+    # extract_portamento_curve は (semitone 単位のリスト) を返す
+    # ただし UstNote 型を期待するため、ダミーオブジェクトを生成するか、
+    # 直接関数を呼び出すために簡易ラッパーを作る。
+    # ここでは UstNote クラスをインポートしてインスタンス化するのが安全。
+    from modules.data.ust_parser import UstNote
+
+    # 最小限の属性を持つ UstNote を作成（他のフィールドはダミー）
+    dummy_note = UstNote(
+        index=0,
+        length=480,  # ダミー
+        lyric="",
+        note_num=60,
+        tempo=120.0,
+        pbs=pbs,
+        pbw=pbw,
+        pby=pby,
+    )
+    curve_list = UstConverter.extract_portamento_curve(dummy_note, resolution)
+    if not curve_list or len(curve_list) != resolution:
+        return None
+
+    return np.array(curve_list, dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
 # VO_SE_Engine への追加メソッド群
 # ---------------------------------------------------------------------------
 
@@ -139,12 +198,13 @@ def _refresh_voice_library_v2(self) -> None:
 
 def _export_to_wav_v2(self, notes, parameters, file_path) -> None:
     """
-    [NEW-2] VCV 解決 + UST ビブラートカーブ注入に対応した export_to_wav。
+    [NEW-2] VCV 解決 + UST ビブラートカーブ + ポルタメントカーブ に対応した export_to_wav。
 
     旧 export_to_wav() との差分:
       - resolve_target_wav() を廃止し VcvResolver を使う
       - vibrato_depth_curve / vibrato_rate_curve を NoteEvent の値から生成する
       - UST _ust_vibrato 拡張フィールドが存在する場合はそちらを優先する
+      - **新規: _ust_pbs/_ust_pbw/_ust_pby があればポルタメントカーブを生成して C++ に渡す**
     """
     if not self.lib:
         raise RuntimeError("Engine Core library missing!")
@@ -218,8 +278,21 @@ def _export_to_wav_v2(self, notes, parameters, file_path) -> None:
             vib_depth = np.zeros(res, dtype=np.float64)
             vib_rate  = np.zeros(res, dtype=np.float64)
 
-        self._temp_refs.extend([p_curve, g_curve, t_curve, b_curve, vib_depth, vib_rate])
+        # ★新規: ポルタメントカーブを生成 (PBS/PBW/PBY があれば)
+        portamento_curve = build_portamento_curve(note, resolution=res)
+        if portamento_curve is not None:
+            portamento_arr = portamento_curve.astype(np.float64)
+            portamento_len = res
+        else:
+            portamento_arr = None
+            portamento_len = 0
 
+        # 参照保持用に追加 (GC 対策)
+        self._temp_refs.extend([p_curve, g_curve, t_curve, b_curve, vib_depth, vib_rate])
+        if portamento_arr is not None:
+            self._temp_refs.append(portamento_arr)
+
+        # CNoteEvent への代入
         c_notes_array[i].wav_path = wav_path.encode("utf-8") if wav_path else b""
         c_notes_array[i].pitch_curve            = p_curve.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
         c_notes_array[i].gender_curve           = g_curve.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
@@ -229,6 +302,14 @@ def _export_to_wav_v2(self, notes, parameters, file_path) -> None:
         c_notes_array[i].vibrato_rate_curve     = vib_rate.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
         c_notes_array[i].pitch_length           = res
         c_notes_array[i].vibrato_curve_length   = res
+
+        # ★新規: ポルタメントフィールドを設定
+        if portamento_arr is not None:
+            c_notes_array[i].portamento_offsets = portamento_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+            c_notes_array[i].portamento_length  = portamento_len
+        else:
+            c_notes_array[i].portamento_offsets = None
+            c_notes_array[i].portamento_length  = 0
 
     try:
         self.lib.execute_render(
@@ -280,4 +361,4 @@ def apply_patch(engine_class) -> None:
     engine_class.refresh_voice_library_v2 = _refresh_voice_library_v2
     engine_class.export_to_wav_v2         = _export_to_wav_v2
     engine_class.load_ust_project         = _load_ust_project
-    logger.info("VO_SE_Engine パッチ適用完了 (VCV + UST + Vibrato)")
+    logger.info("VO_SE_Engine パッチ適用完了 (VCV + UST + Vibrato + Portamento)")
