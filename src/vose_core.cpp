@@ -26,6 +26,8 @@ constexpr const T& clamp(const T& v, const T& lo, const T& hi) {
 #include <mutex>
 #include <condition_variable>
 #include <memory>
+#include <shared_mutex>
+
 
 // 先に型定義を完了させ、ONNXセッション側での未定義エラーを防ぐ
 using VoseMutex = std::mutex;
