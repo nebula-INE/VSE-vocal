@@ -63,6 +63,9 @@ struct VoseStreamNote {
     const double* tension_curve;  // テンションカーブ [pitch_length]  (null = 0.5)
     const double* breath_curve;   // ブレスカーブ [pitch_length]      (null = 0.5)
     int64_t       note_id;        // 呼び出し側が管理するID（更新/削除に使用）
+
+    const double* portamento_offsets;   // ピッチオフセットカーブ（セント単位）
+    int           portamento_length;    // 配列長（0 なら無効）
 };
 
 // ============================================================
