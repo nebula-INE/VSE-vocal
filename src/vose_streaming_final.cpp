@@ -102,26 +102,34 @@ struct QueuedNote {
     int                 pitch_length = 0;
     std::vector<double> pitch_curve, gender_curve, tension_curve, breath_curve;
     std::string         wav_path;
+    std::vector<double> portamento_curve;
 };
 
-class NoteQueue {
-public:
-    // note_id が既存と衝突 → そこ以降を破棄して差し替え（リアルタイム編集の核心）
-    void push(const VoseStreamNote& n) {
-        QueuedNote qn;
-        qn.note_id      = n.note_id;
-        qn.pitch_length = n.pitch_length;
-        qn.wav_path     = n.wav_path ? n.wav_path : "";
+// ② NoteQueue::push メソッド内で portamento をコピー（既存の push 実装に追記）
+void push(const VoseStreamNote& n) {
+    QueuedNote qn;
+    qn.note_id      = n.note_id;
+    qn.pitch_length = n.pitch_length;
+    qn.wav_path     = n.wav_path ? n.wav_path : "";
 
-        auto fill = [&](const double* src, std::vector<double>& dst, double def) {
-            dst.resize(n.pitch_length);
-            if (src) std::copy(src, src + n.pitch_length, dst.begin());
-            else     std::fill(dst.begin(), dst.end(), def);
-        };
-        fill(n.pitch_curve,   qn.pitch_curve,   440.0);
-        fill(n.gender_curve,  qn.gender_curve,  0.5);
-        fill(n.tension_curve, qn.tension_curve, 0.5);
-        fill(n.breath_curve,  qn.breath_curve,  0.5);
+    auto fill = [&](const double* src, std::vector<double>& dst, double def) {
+        dst.resize(n.pitch_length);
+        if (src) std::copy(src, src + n.pitch_length, dst.begin());
+        else     std::fill(dst.begin(), dst.end(), def);
+    };
+    fill(n.pitch_curve,   qn.pitch_curve,   440.0);
+    fill(n.gender_curve,  qn.gender_curve,  0.5);
+    fill(n.tension_curve, qn.tension_curve, 0.5);
+    fill(n.breath_curve,  qn.breath_curve,  0.5);
+
+    // ★ ポルタメントカーブのコピー（データがあれば）
+    if (n.portamento_offsets && n.portamento_length > 0) {
+        qn.portamento_curve.resize(n.portamento_length);
+        std::copy(n.portamento_offsets, n.portamento_offsets + n.portamento_length,
+                  qn.portamento_curve.begin());
+    } else {
+        qn.portamento_curve.clear();
+    }
 
         std::unique_lock<std::mutex> lk(mu_);
         for (auto it = q_.begin(); it != q_.end(); ++it) {
@@ -206,6 +214,7 @@ private:
             QueuedNote qn;
             if (!note_queue_.pop(qn, cancelled_)) break;
 
+
             const int pl = qn.pitch_length;
             if (pl <= 0) { prev_ev = nullptr; continue; }
 
@@ -216,11 +225,15 @@ private:
             // NoteEvent を一時構築（カーブはスタック上のベクタを直接ポイント）
             NoteEvent tmp_n = {};
             tmp_n.wav_path      = qn.wav_path.c_str();
-            tmp_n.pitch_length  = pl;
+            tmp_n.pitch_length  = qn.pitch_length;
             tmp_n.pitch_curve   = qn.pitch_curve.data();
             tmp_n.gender_curve  = qn.gender_curve.data();
             tmp_n.tension_curve = qn.tension_curve.data();
             tmp_n.breath_curve  = qn.breath_curve.data();
+
+            tmp_n.portamento_offsets = qn.portamento_curve.empty() ? nullptr : qn.portamento_curve.data();
+            tmp_n.portamento_length  = static_cast<int>(qn.portamento_curve.size());
+
 
             // oto.ini エントリ取得（streaming でも正しくタイムマッピングする）
             const OtoEntry* found_oto = nullptr;
