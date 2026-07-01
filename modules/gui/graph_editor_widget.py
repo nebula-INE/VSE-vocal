@@ -44,7 +44,19 @@ class GraphEditorWidget(QWidget):
         self.editing_point_index: Optional[int] = None
         self.hover_point_index: Optional[int] = None
 
+        # ★ 描画モードフラグ（True = ペンツール / False = 選択編集）
+        self.pen_mode: bool = False
+        # フリーハンド描画中のポイント追加間隔（ピクセル単位）
+        self.pen_interval: int = 6
+        self._last_pen_pos: Optional[QPointF] = None
+
         logger.info("GraphEditorWidget initialized successfully.")
+
+    @Slot(bool)
+    def set_pen_mode(self, enabled: bool) -> None:
+        """MainWindow からペンモードを切り替える"""
+        self.pen_mode = enabled
+        self.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
 
         # --- Compatibility methods (called from MainWindow) ---
     def set_horizontal_offset(self, offset: int) -> None:
@@ -188,6 +200,17 @@ class GraphEditorWidget(QWidget):
     def mousePressEvent(self, event: QMouseEvent):
         pos = event.position()
         events = self.all_parameters[self.current_mode]
+
+        if self.pen_mode and event.button() == Qt.MouseButton.LeftButton:
+            time_val = float(self.x_to_time(pos.x()))
+            param_val = float(self.y_to_value(pos.y()))
+            self._add_pen_point(time_val, param_val)
+            self._last_pen_pos = pos
+            return
+
+        # 既存の選択編集モード（右クリック削除など）はそのまま
+        super().mousePressEvent(event)
+
         
         if event.button() == Qt.MouseButton.LeftButton:
             self.editing_point_index = self._get_point_at_pos(pos, events)
@@ -201,6 +224,21 @@ class GraphEditorWidget(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent):
         pos = event.position()
+
+        # ★ ペンモード＋左ボタンドラッグ中：連続ポイント追加
+        if self.pen_mode and (event.buttons() & Qt.MouseButton.LeftButton):
+            if self._last_pen_pos is not None:
+                # 前回の位置から十分離れていたら新しいポイントを追加
+                if (pos - self._last_pen_pos).manhattanLength() >= self.pen_interval:
+                    time_val = float(self.x_to_time(pos.x()))
+                    param_val = float(self.y_to_value(pos.y()))
+                    self._add_pen_point(time_val, param_val)
+                    self._last_pen_pos = pos
+            return
+
+        # 既存のマウス移動処理（ホバー等）はそのまま
+        super().mouseMoveEvent(event)
+
         events = self.all_parameters[self.current_mode]
         
         # ドラッグ中（点の移動）
@@ -215,11 +253,34 @@ class GraphEditorWidget(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if self.pen_mode and event.button() == Qt.MouseButton.LeftButton:
+            self._last_pen_pos = None
+            # ポイントが追加されたらソートしてシグナル発火
+            self.all_parameters[self.current_mode].sort(key=lambda x: x.time)
+            self.parameters_changed.emit(self.all_parameters)
+            self.update()
+            return
+        super().mouseReleaseEvent(event)
         if self.editing_point_index is not None:
             # ドラッグ終了時に時間軸の順序が狂う可能性があるため再ソート
             self.all_parameters[self.current_mode].sort(key=lambda x: x.time)
             self.editing_point_index = None
             self.update()
+
+    def _add_pen_point(self, time_val: float, param_val: float) -> None:
+        """ペンツール用のポイント追加（近接ポイントはマージ）"""
+        current_list = self.all_parameters.get(self.current_mode)
+        if current_list is None:
+            return
+        
+        # 既存のポイントと近すぎる場合は上書き（マージ）
+        for p in current_list:
+            if abs(p.time - time_val) < 0.001:  # 1ms以内
+                p.value = param_val
+                return
+        
+        # 新規追加
+        current_list.append(PitchEvent(time=time_val, value=param_val))
 
     def paintEvent(self, event: QPaintEvent):
         painter = QPainter(self)
