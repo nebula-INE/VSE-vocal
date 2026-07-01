@@ -1106,7 +1106,13 @@ class AnalysisThread(QThread):
 # メインウィンドウクラス
 # ==============================================================================
 
-class MainWindow(ProjectIOMixin, AudioOutputMixin, VoiceManagerMixin, QMainWindow):
+class MainWindow(
+    ProjectIOMixin,
+    AudioOutputMixin,
+    VoiceManagerMixin,
+    VoiceManagementMixin,   
+    QMainWindow
+):
 
     """VO-SE Pro  メインウィンドウ"""
     
