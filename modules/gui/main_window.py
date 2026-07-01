@@ -2041,6 +2041,17 @@ class MainWindow(
         self.render_btn.clicked.connect(self.on_render_button_clicked)
         self.toolbar.addWidget(self.render_btn)
 
+         # ペンモードトグル
+        self.pen_mode_action = QAction("✏️ ペンモード", self)
+        self.pen_mode_action.setCheckable(True)
+        self.pen_mode_action.triggered.connect(self.on_pen_mode_toggled)
+        self.toolbar.addAction(self.pen_mode_action)
+    
+        # オートチューン
+        auto_tune_action = QAction("🎵 オートチューン", self)
+        auto_tune_action.triggered.connect(self.auto_tune_selected)
+        self.toolbar.addAction(auto_tune_action)
+
         # 右端を整えるためのスペーサー
         spacer = QWidget()
         self.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
