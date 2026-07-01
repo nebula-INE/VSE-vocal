@@ -2667,6 +2667,11 @@ class MainWindow(
             self.current_track_idx = 0
             self.track_list_widget.setCurrentRow(0)
 
+        # ★ パフォーマンスモニターを起動
+        self.setup_performance_monitoring()   
+        # ★ バッファ調整スライダー（オプション）
+        self.setup_performance_slider()
+
     def log_startup(self, message):
         """標準出力へのログ記録）""" 
         timestamp = time.strftime('%H:%M:%S')
