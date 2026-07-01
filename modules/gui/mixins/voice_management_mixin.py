@@ -12,12 +12,10 @@ from __future__ import annotations
 
 import os
 import pickle
-import sys
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict
 
 from PySide6.QtCore import Slot
 from PySide6.QtWidgets import QMessageBox
-from PySide6.QtGui import QColor
 
 # このミックスインは MainWindow と組み合わせて使うことを前提とする
 # self は MainWindow インスタンス
