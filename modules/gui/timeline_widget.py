@@ -922,10 +922,36 @@ class TimelineWidget(QWidget):
         if event.button() == Qt.MouseButton.RightButton:
             return
 
-        if event.modifiers() & Qt.KeyboardModifier.AltModifier:
-            self.edit_mode = "draw_parameter"
-            self._add_param_pt(pos_f)
-            return
+
+        # ★ Ctrlキーが押されていて、かつノートの上ならコピーモード開始
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            for n in reversed(self.notes_list):
+                r = self.get_note_rect(n)
+                if r.contains(pos_f):
+                    # 選択中のノートをすべてコピー
+                    selected = [n for n in self.notes_list if getattr(n, 'is_selected', False)]
+                    if not selected:
+                        # クリックしたノートだけ選択
+                        self.deselect_all()
+                        n.is_selected = True
+                        selected = [n]
+                    
+                    # コピーを作成（ディープコピー）
+                    import copy
+                    self._drag_copy_notes = []
+                    for src in selected:
+                        clone = copy.deepcopy(src)
+                        clone.is_selected = True
+                        src.is_selected = False  # 元の選択を外す
+                        self.notes_list.append(clone)
+                        self._drag_copy_notes.append(clone)
+                    
+                    # オフセット計算（マウス位置を基点にドラッグ）
+                    self._drag_copy_offset = pos_f.x() - self.time_to_x(clone.start_time)
+                    self.edit_mode = "drag_copy"
+                    self._edit_snapshot_before = self._snapshot_notes()
+                    self.update()
+                    return
 
         for n in reversed(self.notes_list):
             r = self.get_note_rect(n)
@@ -972,6 +998,20 @@ class TimelineWidget(QWidget):
         # --- [1. エッジ・オートスクロール処理] ---
         # ドラッグ中にマウスが画面端にあるかチェック
         self._check_edge_scroll(curr_pos)
+
+        # ★ コピードラッグ中
+        if self.edit_mode == "drag_copy" and self._drag_copy_notes:
+            dx_beats = (curr_pos.x() - self.drag_start_pos.x()) / self.pixels_per_beat
+            dt = self.beats_to_seconds(dx_beats)
+            
+            # 基点となる最初のノートの元の開始時刻を保持
+            base_start = self._drag_copy_notes[0].start_time - dt
+            for clone in self._drag_copy_notes:
+                clone.start_time = max(0.0, base_start + dt)
+            self._invalidate_note_rects()
+            self.update()
+            return
+
 
         if self.edit_mode == "draw_parameter":
             self._add_param_pt(pos_f)
@@ -1048,6 +1088,16 @@ class TimelineWidget(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if self.edit_mode == "draw_parameter":
             self._smooth_param()
+
+        if self.edit_mode == "drag_copy" and self._drag_copy_notes:
+            # コピー完了 → 履歴に登録
+            self.notes_changed_signal.emit()
+            self._commit_edit(self._edit_snapshot_before, "ノートコピー")
+            self._drag_copy_notes = []
+            self.edit_mode = None
+            self.drag_start_pos = None
+            self.update()
+            return
         elif self.edit_mode in ("move", "resize"):
             for n in self.notes_list:
                 if getattr(n, 'is_selected', False) or n == self._resizing_note:
@@ -1065,6 +1115,7 @@ class TimelineWidget(QWidget):
         self._resizing_note = None
         self.drag_start_pos = None
         self.update()
+        super().mouseReleaseEvent(event)  # または元のコードをそのままコピー
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         menu = QMenu(self)
