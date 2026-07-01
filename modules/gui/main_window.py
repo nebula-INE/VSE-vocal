@@ -4630,6 +4630,46 @@ class MainWindow(
     # その他のスロット
     # ==========================================================================
     @Slot()
+    def auto_tune_selected(self) -> None:
+        """
+        選択中のノートのピッチを半音階グリッドにスナップさせる（オートチューン風）
+        """
+        if self.timeline_widget is None:
+            return
+        
+        selected = [n for n in self.timeline_widget.notes_list if getattr(n, 'is_selected', False)]
+        if not selected:
+            self.statusBar().showMessage("オートチューン: ノートが選択されていません")
+            return
+        
+        # 元のピッチを保存（Undo用）
+        before_snapshot = self.timeline_widget._snapshot_notes()
+        
+        for note in selected:
+            # MIDIノート番号に最も近い整数に丸める（半音単位）
+            original = float(getattr(note, 'note_number', 60))
+            snapped = int(round(original))
+            # 範囲制限
+            note.note_number = max(0, min(127, snapped))
+            
+            # もしピッチカーブ（オートメーション）が存在すればそれも補正
+            # （GraphEditorWidget の Pitch イベントを参照）
+            if hasattr(self, 'graph_editor_widget'):
+                pitch_events = self.graph_editor_widget.all_parameters.get("Pitch", [])
+                for ev in pitch_events:
+                    if note.start_time <= ev.time <= note.start_time + note.duration:
+                        # セント単位で補正（MIDIノート基準にスナップ）
+                        midi_val = 69 + 12 * math.log2(ev.value / 440.0)
+                        snapped_midi = round(midi_val)
+                        ev.value = 440.0 * (2.0 ** ((snapped_midi - 69) / 12.0))
+        
+        self.timeline_widget._invalidate_note_rects()
+        self.timeline_widget.notes_changed_signal.emit()
+        self.timeline_widget._commit_edit(before_snapshot, "オートチューン")
+        self.timeline_widget.update()
+        self.statusBar().showMessage(f"オートチューン適用: {len(selected)} ノート")
+    
+    @Slot()
     def update_tempo_from_input(self):
         """
         テンポ入力をシステム全体（Timeline, GraphEditor, Engine）に反映する。
