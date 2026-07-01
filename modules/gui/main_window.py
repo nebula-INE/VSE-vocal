@@ -994,6 +994,72 @@ class VoiceCardWidget(QFrame):
             }}
         """)
 
+        def setup_performance_monitoring(self) -> None:
+        """パフォーマンスモニターをドッキング可能なウィジェットとして追加"""
+        # ドッキングウィジェットとして作成
+        from PySide6.QtWidgets import QDockWidget
+        
+        dock = QDockWidget("パフォーマンス", self)
+        dock.setObjectName("PerformanceDock")
+        monitor = PerformanceMonitorWidget(self)
+        monitor.parent = self  # バッファ情報取得用
+        dock.setWidget(monitor)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        
+        # ツールバーに表示/非表示トグルを追加
+        view_menu = self.menuBar().addMenu("表示(&V)")
+        toggle_action = dock.toggleViewAction()
+        toggle_action.setText("パフォーマンスモニター")
+        view_menu.addAction(toggle_action)
+    
+    # 負荷調整スライダーを setup_control_panel または setup_toolbar に追加
+    def setup_performance_slider(self) -> None:
+        """バッファサイズ調整スライダー（パフォーマンス調整）"""
+        from PySide6.QtWidgets import QSlider, QLabel, QHBoxLayout
+        
+        # すでに setup_control_panel で追加しても良いが、ここでは独立したメソッドとして提供
+        # 既存の main_layout に追加する例
+        perf_layout = QHBoxLayout()
+        perf_layout.addWidget(QLabel("バッファサイズ:"))
+        
+        self.buffer_slider = QSlider(Qt.Orientation.Horizontal)
+        self.buffer_slider.setRange(1, 10)  # 1=最小(低遅延), 10=最大(安定)
+        self.buffer_slider.setValue(4)      # デフォルト中間
+        self.buffer_slider.setMaximumWidth(150)
+        self.buffer_slider.valueChanged.connect(self.on_buffer_size_changed)
+        perf_layout.addWidget(self.buffer_slider)
+        
+        self.buffer_label = QLabel("256 samples")
+        perf_layout.addWidget(self.buffer_label)
+        
+        # メインレイアウトに追加（適宜調整）
+        if hasattr(self, 'main_layout'):
+            self.main_layout.insertLayout(1, perf_layout)  # 上部に挿入
+    
+    @Slot(int)
+    def on_buffer_size_changed(self, value: int) -> None:
+        """バッファサイズ変更（C++エンジンと AudioOutput に反映）"""
+        # マッピング: 1→64, 2→128, 3→256, 4→512, ... 10→8192
+        sizes = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+        idx = max(0, min(value - 1, len(sizes) - 1))
+        new_size = sizes[idx]
+        
+        self.buffer_label.setText(f"{new_size} samples")
+        
+        # 1. AudioOutput に反映
+        if hasattr(self, 'audio_output'):
+            self.audio_output.block_size = new_size
+        
+        # 2. C++ エンジンに反映（存在する場合）
+        if hasattr(self, 'vo_se_engine') and hasattr(self.vo_se_engine, 'lib'):
+            try:
+                if hasattr(self.vo_se_engine.lib, 'vose_set_buffer_size'):
+                    self.vo_se_engine.lib.vose_set_buffer_size(new_size)
+            except Exception:
+                pass
+        
+        self.statusBar().showMessage(f"バッファサイズ: {new_size} samples")
+
 
 # ==============================================================================
 # ボイスカードギャラリー（実音源優先 ＋ 募集枠を最下段に配置）
