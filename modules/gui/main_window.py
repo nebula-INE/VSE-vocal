@@ -8,7 +8,6 @@ import time
 import wave
 import json
 import ctypes
-import pickle
 import threading
 import math
 from copy import deepcopy
