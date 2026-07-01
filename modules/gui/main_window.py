@@ -72,6 +72,7 @@ try:
     from modules.data.licensing import LicenseManager # type: ignore[assignment]
     from modules.gui.audio_mixin import AudioOutputMixin # type: ignore[assignment]
     from modules.gui.voice_mixin import VoiceManagerMixin # type: ignore[assignment]
+    from modules.gui.mixins.voice_management_mixin import VoiceManagementMixin # type: ignore[assignment]
 except ImportError as e:
     print(f"⚠️ Absolute import failed, falling back to relative: {e}")
     # フォールバック（相対インポート）
