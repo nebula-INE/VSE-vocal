@@ -516,6 +516,87 @@ class HistoryManager:
         self.undo_stack.append(command)
 
 
+# ==========================================================================
+# ---------- パフォーマンスモニター用のカスタムウィジェット ----------
+# ==========================================================================
+
+class PerformanceMonitorWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("パフォーマンスモニター")
+        self.setMinimumSize(300, 150)
+        
+        layout = QVBoxLayout(self)
+        
+        # CPU
+        self.cpu_label = QLabel("CPU: --%")
+        layout.addWidget(self.cpu_label)
+        self.cpu_bar = QProgressBar()
+        self.cpu_bar.setRange(0, 100)
+        layout.addWidget(self.cpu_bar)
+        
+        # メモリ
+        self.mem_label = QLabel("メモリ: -- MB")
+        layout.addWidget(self.mem_label)
+        self.mem_bar = QProgressBar()
+        self.mem_bar.setRange(0, 100)
+        layout.addWidget(self.mem_bar)
+        
+        # オーディオバッファ
+        self.buffer_label = QLabel("オーディオバッファ: --%")
+        layout.addWidget(self.buffer_label)
+        self.buffer_bar = QProgressBar()
+        self.buffer_bar.setRange(0, 100)
+        layout.addWidget(self.buffer_bar)
+        
+        # 更新タイマー
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)  # 1秒ごと
+        self.timer.timeout.connect(self.update_stats)
+        self.timer.start()
+        
+        self.setStyleSheet("""
+            QProgressBar { text-align: center; height: 20px; }
+            QProgressBar::chunk { background-color: #2f81f7; }
+        """)
+    
+    def update_stats(self):
+        # CPU
+        if PSUTIL_AVAILABLE:
+            cpu = psutil.cpu_percent()
+            mem = psutil.virtual_memory()
+            self.cpu_label.setText(f"CPU: {cpu:.1f}%")
+            self.cpu_bar.setValue(int(cpu))
+            self.mem_label.setText(f"メモリ: {mem.used // 1024 // 1024} MB / {mem.total // 1024 // 1024} MB")
+            self.mem_bar.setValue(int(mem.percent))
+        else:
+            self.cpu_label.setText("CPU: psutil 未インストール")
+            self.mem_label.setText("メモリ: psutil 未インストール")
+        
+        # オーディオバッファ（AudioOutput のキューサイズを参照）
+        buffer_pct = 0
+        if parent and hasattr(parent, 'audio_output'):
+            ao = parent.audio_output
+            if hasattr(ao, 'buffer_queue') and hasattr(ao, 'maxsize'):
+                qsize = ao.buffer_queue.qsize()
+                maxsize = ao.maxsize if hasattr(ao, 'maxsize') else 64
+                buffer_pct = int((qsize / maxsize) * 100) if maxsize > 0 else 0
+                self.buffer_label.setText(f"オーディオバッファ: {qsize}/{maxsize} ブロック")
+            else:
+                self.buffer_label.setText("オーディオバッファ: 取得不可")
+        else:
+            self.buffer_label.setText("オーディオバッファ: 未接続")
+        
+        # バッファ不足警告（20%以下で赤色）
+        if buffer_pct < 20:
+            self.buffer_bar.setStyleSheet("QProgressBar::chunk { background-color: #ff4444; }")
+        elif buffer_pct < 40:
+            self.buffer_bar.setStyleSheet("QProgressBar::chunk { background-color: #ffaa44; }")
+        else:
+            self.buffer_bar.setStyleSheet("QProgressBar::chunk { background-color: #2f81f7; }")
+        self.buffer_bar.setValue(buffer_pct)
+
+
 # ==========================================================
 #  Pro audio modeling レンダリングボタンを押さなくても、スペースキーで「今あるデータ」を合成して即座に鳴らす機能。
 # ==========================================================
