@@ -122,6 +122,9 @@ class TimelineWidget(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
 
+        self._drag_copy_notes: List[Any] = []   # コピー元ノート（移動中）
+        self._drag_copy_offset: float = 0.0     # マウス
+
         self.tempo: float = 120.0
         self.pixels_per_beat: float = 80.0
         self.key_height_pixels: float = 20.0
