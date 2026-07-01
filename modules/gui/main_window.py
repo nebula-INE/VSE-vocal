@@ -87,6 +87,12 @@ except ImportError as e:
 # ここでの import は main_window.py を逆 import しないため、循環 import は発生しない。
 from modules.gui.mixins.project_io_mixin import ProjectIOMixin
 
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
 # ==========================================================================
 # 6. グローバル設定
 # ==========================================================================
