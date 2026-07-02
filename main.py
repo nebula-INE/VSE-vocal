@@ -176,10 +176,14 @@ class VoSeEngine:
 
                 # 2. WinDLL を使用し、LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR フラグ (0x0008) を指定
                 #    これにより、DLLのあるディレクトリが優先的に検索される
-                try:
-                    self.c_engine = ctypes.WinDLL(abs_dll_path, winmode=0x0008)
-                except AttributeError:
-                    # 古いPython/ctypesでは winmode がサポートされていない場合のフォールバック
+                if hasattr(ctypes, "WinDLL"):
+                    try:
+                        self.c_engine = ctypes.WinDLL(abs_dll_path, winmode=0x0008)
+                    except Exception as e:
+                        print(f"[Warning] WinDLL with winmode failed, falling back to CDLL: {e}")
+                        self.c_engine = ctypes.CDLL(abs_dll_path)
+                else:
+                    # 古い環境 / 非Windows でのフォールバック（実際にはここには来ない）
                     self.c_engine = ctypes.CDLL(abs_dll_path)
             else:
                 # macOS / Linux: RTLD_GLOBAL (mode=10) でロード
@@ -212,7 +216,7 @@ class VoSeEngine:
             import traceback
             traceback.print_exc()
             self.c_engine = None
-
+            
     def analyze_intonation(self, text):
         """【読み上げ用】音韻解析"""
         print(f"\n--- 読み上げ解析実行: '{text}' ---")
