@@ -41,12 +41,19 @@ a = Analysis(
         'pyopenjtalk', 
         'numpy', 
         'PySide6',
-        'rtmidi',              # ← スモークテストでのクラッシュ原因を解消するために追加
-        'mido.backends.rtmidi', # ← midoバックエンドを明示的に指定して同梱させる
-        
-        # === 修正：見落とされていた相対インポート・内部モジュールを強制同梱させる ===
+        'rtmidi',
+        'mido',              # 🔥 mido本体を追加
+        'mido.backends',     # 🔥 バックエンド全体を追加
+        'mido.backends.rtmidi',
         'modules.gui.mixins._mixin_base'
     ],
+    # 🔥 さらに collect-all でサブモジュールを強制収集
+    hookspath=[],
+    hooksconfig={
+        'mido': {
+            'collect_submodules': ['mido.backends']
+        }
+    },
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
