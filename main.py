@@ -139,9 +139,11 @@ class VoSeEngine:
     def _load_c_engine(self):
         """
         OSに応じたライブラリ（DLL/dylib）を最適なパスからロードします。
+        Windows では依存DLLのパス問題を解決するため、add_dll_directory と winmode を使用します。
         """
         dll_path = get_engine_library_path()
 
+        # --- macOS: バンドル内の代替パスをチェック ---
         if self.os_name == "Darwin":
             if not os.path.exists(dll_path):
                 meipass = getattr(sys, '_MEIPASS', None)
@@ -152,32 +154,63 @@ class VoSeEngine:
                         dll_path = alt_path
                         print(f"[Info] Mac Frameworks path used: {dll_path}")
 
-        if os.path.exists(dll_path):
-            try:
-                abs_dll_path = os.path.abspath(dll_path)
-
-                if self.os_name == "Windows":
-                    self.c_engine = ctypes.CDLL(abs_dll_path)
-                else:
-                    self.c_engine = ctypes.CDLL(abs_dll_path, mode=10)  # RTLD_GLOBAL
-
-                if hasattr(self.c_engine, 'process_voice'):
-                    self.c_engine.process_voice.argtypes = [
-                        ctypes.POINTER(ctypes.c_float),
-                        ctypes.c_int,
-                        ctypes.POINTER(ctypes.c_float)
-                    ]
-                    self.c_engine.process_voice.restype = None
-
-                print(f"[Success] C-Engine loaded: {abs_dll_path}")
-            except Exception as e:
-                print(f"[Error] Failed to load C-Engine: {e}")
-                if hasattr(sys, 'stderr'):
-                    import traceback
-                    traceback.print_exc()
-                self.c_engine = None
-        else:
+        # --- ファイル存在チェック ---
+        if not os.path.exists(dll_path):
             print(f"[Warning] C-Engine file not found at: {dll_path}")
+            self.c_engine = None
+            return
+
+        abs_dll_path = os.path.abspath(dll_path)
+        dll_dir = os.path.dirname(abs_dll_path)
+
+        try:
+            # --- Windows 固有のDLLロード処理 ---
+            if self.os_name == "Windows":
+                # 1. 依存DLL（MSVCランタイムなど）の検索パスにDLLディレクトリを追加
+                if hasattr(os, "add_dll_directory"):
+                    try:
+                        os.add_dll_directory(dll_dir)
+                        print(f"[Info] Added DLL directory: {dll_dir}")
+                    except Exception as e:
+                        print(f"[Warning] add_dll_directory failed: {e}")
+
+                # 2. WinDLL を使用し、LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR フラグ (0x0008) を指定
+                #    これにより、DLLのあるディレクトリが優先的に検索される
+                try:
+                    self.c_engine = ctypes.WinDLL(abs_dll_path, winmode=0x0008)
+                except AttributeError:
+                    # 古いPython/ctypesでは winmode がサポートされていない場合のフォールバック
+                    self.c_engine = ctypes.CDLL(abs_dll_path)
+            else:
+                # macOS / Linux: RTLD_GLOBAL (mode=10) でロード
+                self.c_engine = ctypes.CDLL(abs_dll_path, mode=10)  # RTLD_GLOBAL
+
+            # --- 関数シグネチャの設定（process_voice が存在する場合のみ） ---
+            if hasattr(self.c_engine, 'process_voice'):
+                self.c_engine.process_voice.argtypes = [
+                    ctypes.POINTER(ctypes.c_float),
+                    ctypes.c_int,
+                    ctypes.POINTER(ctypes.c_float)
+                ]
+                self.c_engine.process_voice.restype = None
+                print(f"[Success] C-Engine loaded: {abs_dll_path}")
+            else:
+                # process_voice が無い場合は非対応エンジンとして扱うが、一応ロードは成功とみなす
+                print(f"[Warning] C-Engine loaded but 'process_voice' not found: {abs_dll_path}")
+                # 必要に応じてここで self.c_engine = None にしても良いが、他の関数が使える可能性もあるので残す
+
+        except OSError as e:
+            # OSError（例：依存DLL不足）は特に詳細に表示
+            print(f"[Error] Failed to load C-Engine (OSError): {e}")
+            if self.os_name == "Windows":
+                print("[Hint] Microsoft Visual C++ Redistributable がインストールされているか確認してください。")
+            import traceback
+            traceback.print_exc()
+            self.c_engine = None
+        except Exception as e:
+            print(f"[Error] Failed to load C-Engine: {e}")
+            import traceback
+            traceback.print_exc()
             self.c_engine = None
 
     def analyze_intonation(self, text):
