@@ -169,7 +169,8 @@ class VoSeEngine:
                 # 1. 依存DLL（MSVCランタイムなど）の検索パスにDLLディレクトリを追加
                 if hasattr(os, "add_dll_directory"):
                     try:
-                        os.add_dll_directory(dll_dir)
+                        # getattr を使って静的解析のエラーを回避
+                        getattr(os, "add_dll_directory")(dll_dir)
                         print(f"[Info] Added DLL directory: {dll_dir}")
                     except Exception as e:
                         print(f"[Warning] add_dll_directory failed: {e}")
@@ -178,7 +179,8 @@ class VoSeEngine:
                 #    これにより、DLLのあるディレクトリが優先的に検索される
                 if hasattr(ctypes, "WinDLL"):
                     try:
-                        self.c_engine = ctypes.WinDLL(abs_dll_path, winmode=0x0008)
+                        # getattr を使って静的解析のエラーを回避
+                        self.c_engine = getattr(ctypes, "WinDLL")(abs_dll_path, winmode=0x0008)
                     except Exception as e:
                         print(f"[Warning] WinDLL with winmode failed, falling back to CDLL: {e}")
                         self.c_engine = ctypes.CDLL(abs_dll_path)
