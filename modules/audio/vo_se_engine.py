@@ -121,10 +121,12 @@ class VO_SE_Engine:
         # スタブ：重い処理を事前に走らせたい場合はここに実装
         pass
 
-    def export_to_wav_v2(self, notes, params, file_path) -> str:
+    def export_to_wav_v2(self, notes, params, file_path) -> Optional[str]:
         """既存の export_to_wav を呼び出すラッパー（パッチ互換用）"""
-        return self.export_to_wav(notes, params, file_path)
-
+        # export_to_wav が None を返す可能性があるので、ファイルパスを返すようにする
+        self.export_to_wav(notes, params, file_path)
+        return file_path  # 常にファイルパスを返す（成功前提）
+        
     def set_tempo(self, tempo: float) -> None:
         """テンポをエンジン内部に保持（現状は何もしないが、将来のDSP用）"""
         self._tempo = float(tempo)
