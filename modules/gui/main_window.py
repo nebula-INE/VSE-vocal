@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (
     QPushButton, QFileDialog, QScrollBar, QInputDialog, QLineEdit,
     QLabel, QSplitter, QComboBox, QProgressBar, QMessageBox, QToolBar,
     QGridLayout, QFrame, QDialog, QScrollArea, QSizePolicy, QButtonGroup,
-    QListWidget, QApplication
+    QListWidget, QApplication, 
+    QDockWidget     
 )
 from PySide6.QtGui import (
     QAction, QKeySequence, QFont, QColor, QShortcut, QPixmap, 
