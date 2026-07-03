@@ -1749,43 +1749,48 @@ class MainWindow(
         self._apply_initial_styles()
 
     def apply_apple_refined_style(self) -> None:
-        """AppleライクなミニマルUIテーマを全体へ適用。"""
-        self.setStyleSheet("""
-            QMainWindow {
+        """AppleライクなミニマルUIテーマを全体へ適用（Windowsはフォントサイズ調整済）"""
+        import platform
+
+        # Windows では pt 単位を使い、他では px 単位（Mac での見え方を維持）
+        font_size = "10pt" if platform.system() == "Windows" else "12px"
+
+        self.setStyleSheet(f"""
+            QMainWindow {{
                 background: #1c1c1e;
                 color: #f5f5f7;
-            }
-            QWidget {
+            }}
+            QWidget {{
                 background: #1c1c1e;
                 color: #f5f5f7;
                 font-family: "SF Pro Text", "Segoe UI", "Hiragino Kaku Gothic ProN";
-                font-size: 12px;
-            }
-            QToolBar {
+                font-size: {font_size};
+            }}
+            QToolBar {{
                 background: rgba(44, 44, 46, 0.88);
                 border: 1px solid #3a3a3c;
                 spacing: 6px;
                 padding: 3px 6px;
-            }
-            QLabel { color: #c7c7cc; }
-            QPushButton {
+            }}
+            QLabel {{ color: #c7c7cc; }}
+            QPushButton {{
                 background: #2c2c2e;
                 color: #f5f5f7;
                 border: 1px solid #48484a;
                 border-radius: 9px;
                 padding: 6px 14px;
                 font-weight: 600;
-            }
-            QPushButton:hover { background: #3a3a3c; }
-            QPushButton:pressed { background: #48484a; }
-            QPushButton#PrimaryButton {
+            }}
+            QPushButton:hover {{ background: #3a3a3c; }}
+            QPushButton:pressed {{ background: #48484a; }}
+            QPushButton#PrimaryButton {{
                 background: #0071e3;
                 color: #ffffff;
                 border: 1px solid #0071e3;
-            }
-            QPushButton#PrimaryButton:hover { background: #0a84ff; }
-            QPushButton#PrimaryButton:pressed { background: #0063cc; }
-                        QPushButton#SegmentLeft, QPushButton#SegmentMid, QPushButton#SegmentRight {
+            }}
+            QPushButton#PrimaryButton:hover {{ background: #0a84ff; }}
+            QPushButton#PrimaryButton:pressed {{ background: #0063cc; }}
+            QPushButton#SegmentLeft, QPushButton#SegmentMid, QPushButton#SegmentRight {{
                 background: #2c2c2e;
                 color: #d1d1d6;
                 border: 1px solid #505055;
@@ -1793,55 +1798,53 @@ class MainWindow(
                 border-radius: 0px;
                 min-width: 78px;
                 padding: 5px 11px;
-            }
-            QPushButton#SegmentRight { border-right-width: 1px; }
-            QPushButton#SegmentLeft {
+            }}
+            QPushButton#SegmentRight {{ border-right-width: 1px; }}
+            QPushButton#SegmentLeft {{
                 border-top-left-radius: 9px;
                 border-bottom-left-radius: 9px;
-            }
-            QPushButton#SegmentRight {
+            }}
+            QPushButton#SegmentRight {{
                 border-top-right-radius: 9px;
                 border-bottom-right-radius: 9px;
-            }
-
-                        QPushButton#SegmentLeft:checked, QPushButton#SegmentMid:checked, QPushButton#SegmentRight:checked {
+            }}
+            QPushButton#SegmentLeft:checked, QPushButton#SegmentMid:checked, QPushButton#SegmentRight:checked {{
                 background: #f5f5f7;
                 color: #101012;
                 border-color: #d8d8de;
-            }
-            QPushButton#SegmentLeft:hover, QPushButton#SegmentMid:hover, QPushButton#SegmentRight:hover {
+            }}
+            QPushButton#SegmentLeft:hover, QPushButton#SegmentMid:hover, QPushButton#SegmentRight:hover {{
                 background: #38383d;
-            }
-            QPushButton#SegmentLeft:checked:hover, QPushButton#SegmentMid:checked:hover, QPushButton#SegmentRight:checked:hover {
+            }}
+            QPushButton#SegmentLeft:checked:hover, QPushButton#SegmentMid:checked:hover, QPushButton#SegmentRight:checked:hover {{
                 background: #ffffff;
-            }
-            
-            QLineEdit, QComboBox, QListWidget, QTextEdit, QPlainTextEdit {
+            }}
+            QLineEdit, QComboBox, QListWidget, QTextEdit, QPlainTextEdit {{
                 background: #2c2c2e;
                 border: 1px solid #48484a;
                 border-radius: 9px;
                 padding: 6px;
-            }
-            QLineEdit:focus, QComboBox:focus, QListWidget:focus {
+            }}
+            QLineEdit:focus, QComboBox:focus, QListWidget:focus {{
                 border: 1px solid #0a84ff;
-            }
-            QSplitter::handle { background: #3a3a3c; }
-            QScrollBar:vertical, QScrollBar:horizontal {
+            }}
+            QSplitter::handle {{ background: #3a3a3c; }}
+            QScrollBar:vertical, QScrollBar:horizontal {{
                 background: #1c1c1e;
                 margin: 2px;
-            }
-            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+            }}
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
                 background: #636366;
                 border-radius: 5px;
                 min-height: 28px;
                 min-width: 28px;
-            }
-            QScrollBar::add-line, QScrollBar::sub-line { width: 0px; height: 0px; }
-            QStatusBar {
+            }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ width: 0px; height: 0px; }}
+            QStatusBar {{
                 background: #2c2c2e;
                 border-top: 1px solid #3a3a3c;
                 color: #c7c7cc;
-            }
+            }}
         """)
 
     def _refresh_transport_button_states(self) -> None:
