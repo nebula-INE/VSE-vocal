@@ -2324,18 +2324,30 @@ class MainWindow(
         if self.tempo_input:
             self.tempo_input.returnPressed.connect(self.update_tempo_from_input)
 
-        # --- 5. ボイスギャラリーとの接続（キャラクター切り替え） ---
+        # ---5,グラフエディタの編集履歴を Undo/Redo に登録
+        if self.graph_editor_widget is not None:
+            self.graph_editor_widget.edit_committed_signal.connect(
+                self.on_graph_edit_committed
+            )
+
+        # ---6.エフェクトパネルのパラメータ変更をエンジンに反映（例）
+        if hasattr(self, 'effects_panel'):
+            self.effects_panel.effect_parameters_changed.connect(
+                self.on_effect_parameters_changed
+            )
+
+        # --- 7. ボイスギャラリーとの接続（キャラクター切り替え） ---
         # VoiceCardGalleryが MainWindow の属性 (self.voice_gallery) として存在すると仮定
         if hasattr(self, 'voice_gallery') and self.voice_gallery:
             self.voice_gallery.voice_selected.connect(self.on_voice_changed)
 
-        # --- 6. 再生・停止・録音ボタンの制御 ---
+        # --- 8.再生・停止・録音ボタンの制御 ---
         if self.play_button:
             self.play_button.clicked.connect(self.toggle_playback)
         if self.record_button:
             self.record_button.clicked.connect(self.toggle_recording)
 
-        # --- 7. エンジンからのフィードバック（再生位置の同期） ---
+        # --- 9. エンジンからのフィードバック（再生位置の同期） ---
         if self.playback_timer:
             self.playback_timer.timeout.connect(self.update_playback_ui)
 
