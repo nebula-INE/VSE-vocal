@@ -62,6 +62,11 @@ class GraphEditorWidget(QWidget):
     def _snapshot_parameters(self) -> Dict[str, Any]:
         return copy.deepcopy(self.all_parameters)
 
+    def _restore_parameters_snapshot(self, snapshot: dict) -> None:
+        """Undo/Redo 用：パラメータスナップショットを復元"""
+        self.all_parameters = snapshot
+        self.update()
+
     def _restore_parameters_snapshot(self, snapshot: Dict[str, Any]) -> None:
         self.all_parameters = copy.deepcopy(snapshot)
         self.update()
