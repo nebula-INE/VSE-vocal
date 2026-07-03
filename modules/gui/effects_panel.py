@@ -1,23 +1,27 @@
 # effects_panel.py
 
+from typing import Dict, List, Any
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
     QPushButton, QGroupBox, QScrollArea, QComboBox, QGridLayout
 )
-from PySide6.QtCore import Qt, Signal
-from typing import Dict, List, Any
+
 
 class EffectsPanel(QWidget):
-    effect_parameters_changed = Signal(str, dict)
+    """エフェクトチェーン管理パネル"""
+    effect_parameters_changed = Signal(str, dict)  # effect_id, params
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.effects: List[Dict[str, Any]] = []
-        self.effect_widgets: Dict[str, QWidget] = {}
+        self.effects: List[Dict[str, Any]] = []          # エフェクトデータ
+        self.effect_widgets: Dict[str, QWidget] = {}    # エフェクトID → ウィジェット
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+
+        # スクロールエリア
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self.container = QWidget()
@@ -25,23 +29,31 @@ class EffectsPanel(QWidget):
         scroll.setWidget(self.container)
         layout.addWidget(scroll)
 
-        # 追加コンボボックスとボタン
+        # 追加コントロール
         add_layout = QHBoxLayout()
         self.effect_selector = QComboBox()
         self.effect_selector.addItems(["コンプレッサー", "リバーブ", "EQ"])
         self.add_btn = QPushButton("追加")
-        self.add_btn.clicked.connect(lambda: self.add_effect(self.effect_selector.currentText()))
-        add_layout.addWidget(QLabel("追加:"))
+        self.add_btn.clicked.connect(self.on_add_effect)
+        add_layout.addWidget(QLabel("エフェクト:"))
         add_layout.addWidget(self.effect_selector)
         add_layout.addWidget(self.add_btn)
         layout.addLayout(add_layout)
 
+    def on_add_effect(self):
+        effect_type = self.effect_selector.currentText()
+        self.add_effect(effect_type)
+
     def add_effect(self, effect_type: str):
         effect_id = f"{effect_type}_{len(self.effects)}"
         params = self._default_params(effect_type)
-        data = {"id": effect_id, "type": effect_type, "enabled": True, "params": params}
+        data = {
+            "id": effect_id,
+            "type": effect_type,
+            "enabled": True,
+            "params": params,
+        }
         self.effects.append(data)
-
         widget = self._create_effect_widget(data)
         self.container_layout.addWidget(widget)
         self.effect_widgets[effect_id] = widget
@@ -50,7 +62,7 @@ class EffectsPanel(QWidget):
         defaults = {
             "コンプレッサー": {"threshold": 0.5, "ratio": 4.0, "attack": 0.01, "release": 0.1, "gain": 0.0},
             "リバーブ": {"room_size": 0.5, "damping": 0.5, "wet": 0.3, "dry": 0.7, "width": 0.5},
-            "EQ": {"freq": 1000.0, "gain": 0.0, "q": 1.0}
+            "EQ": {"freq": 1000.0, "gain": 0.0, "q": 1.0},
         }
         return defaults.get(effect_type, {})
 
@@ -69,7 +81,7 @@ class EffectsPanel(QWidget):
             slider.setValue(int(value * 1000))
             val_label = QLabel(f"{value:.2f}")
             slider.valueChanged.connect(
-                lambda v, n=name: self._on_param(data["id"], n, v / 1000.0, val_label)
+                lambda v, n=name, lbl=val_label: self._on_param(data["id"], n, v / 1000.0, lbl)
             )
             layout.addWidget(label, row, 0)
             layout.addWidget(slider, row, 1)
