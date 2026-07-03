@@ -658,71 +658,21 @@ jobs:
           echo "✅ macOS Linkage & Code Signing completed successfully!"
 
 
-      - name: Smoke test packaged app startup
-        shell: python
+      - name: "🧪 Run pytest (smoke + unit)"
+        shell: bash
         env:
-          VOSE_STARTUP_SMOKE_TEST: "1"
           QT_QPA_PLATFORM: offscreen
+          QT_MEDIA_BACKEND: ffmpeg
         run: |
-          import os
-          import subprocess
-          import sys
-          import time
+          # pytest と必要なプラグインをインストール
+          python -m pip install pytest pytest-xdist
 
-          env_copy = os.environ.copy()
-          env_copy["QT_QPA_PLATFORM"] = "offscreen"
-          env_copy["QT_MEDIA_BACKEND"] = "ffmpeg"
-          env_copy["VOSE_STARTUP_SMOKE_TEST"] = "1"
-          # Ensure subprocess runs Python in UTF-8 mode on Windows
-          env_copy["PYTHONUTF8"] = "1"
+          # パッケージ化された実行ファイルが存在するか確認（デバッグ用）
+          echo "Checking dist/ contents:"
+          ls -la dist/ || true
 
-          if "${{ matrix.os }}" == "windows-latest":
-              app_path = os.path.join("dist", "VO-SE_vocal_Win.exe")
-          elif "${{ runner.os }}" == "Linux":
-              app_path = os.path.join("dist", "VO-SE_vocal_Linux")
-          else:
-              app_path = os.path.join(
-                  "dist",
-                  "VO-SE_vocal_Mac.app",
-                  "Contents",
-                  "MacOS",
-                  "VO-SE_vocal_Mac",
-              )
-
-          print(f"Smoke testing packaged app: {app_path}")
-          if not os.path.exists(app_path):
-              raise SystemExit(f"Packaged app executable not found: {app_path}")
-
-          proc = subprocess.Popen(
-              [app_path],
-              env=env_copy,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.PIPE,
-              text=True
-          )
-
-          print("Waiting 5 seconds to verify application stability...")
-          time.sleep(5)
-
-          return_code = proc.poll()
-
-          if return_code is None:
-              # 💡 Windowsでのエンコードエラーを防ぐため、絵文字(✅)をすべて排除
-              print("SUCCESS: App is running stably without crashing. Terminating for CI flow.")
-              proc.terminate()
-              try:
-                  proc.wait(timeout=3)
-              except subprocess.TimeoutExpired:
-                  proc.kill()
-              print("SUCCESS: Smoke test passed successfully (Process verified)!")
-          else:
-              stdout, stderr = proc.communicate()
-              print("--- STDOUT ---")
-              print(stdout)
-              print("--- STDERR ---")
-              print(stderr, file=sys.stderr)
-              print(f"ERROR: Application crashed on startup with exit code: {return_code}")
-              raise SystemExit(return_code)
+          # スモークテストを実行（失敗したら即座に停止）
+          python -m pytest tests/ -v -m smoke --maxfail=1
 
       - name: 🍎 Optional notarize macOS app (recommended)
         if: startsWith(matrix.os, 'macos')
