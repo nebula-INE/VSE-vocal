@@ -1725,7 +1725,7 @@ class MainWindow(
         self.effects_dock = QDockWidget("エフェクトチェーン", self)
         self.effects_panel = EffectsPanel(self)
         self.effects_dock.setWidget(self.effects_panel)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.effects_dock)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.effects_dock)
 
         # 3. 各セクションの順次セットアップ
         # 依存関係（setup_actionsはtimeline_widgetとQActionを必要とし、
