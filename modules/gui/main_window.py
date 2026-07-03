@@ -72,6 +72,7 @@ try:
     from modules.gui.audio_mixin import AudioOutputMixin # type: ignore[assignment]
     from modules.gui.voice_mixin import VoiceManagerMixin # type: ignore[assignment]
     from modules.gui.mixins.voice_management_mixin import VoiceManagementMixin # type: ignore[assignment]
+    from modules.gui.effects_panel import EffectsPanel  # type: ignore[assignment]
 except ImportError as e:
     print(f"⚠️ Absolute import failed, falling back to relative: {e}")
     # フォールバック（相対インポート）
@@ -1718,6 +1719,12 @@ class MainWindow(
         self.main_layout = QVBoxLayout(central_widget)
         self.main_layout.setContentsMargins(5, 5, 5, 5)
         self.main_layout.setSpacing(2)
+
+        # エフェクトパネルを右側にドッキング
+        self.effects_dock = QDockWidget("エフェクトチェーン", self)
+        self.effects_panel = EffectsPanel(self)
+        self.effects_dock.setWidget(self.effects_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.effects_dock)
 
         # 3. 各セクションの順次セットアップ
         # 依存関係（setup_actionsはtimeline_widgetとQActionを必要とし、
