@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
-    QPushButton, QGroupBox, QCheckBox, QScrollArea, QComboBox, QGridLayout
+    QPushButton, QGroupBox, QScrollArea, QComboBox, QGridLayout
 )
 from PySide6.QtCore import Qt, Signal
 from typing import Dict, List, Any
