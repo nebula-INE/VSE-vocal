@@ -497,6 +497,13 @@ class TimelineWidget(QWidget):
     def get_notes(self) -> list:
         return self.notes_list
 
+    def get_max_beat_position(self) -> float:
+        """現在のノート列の最終位置を「拍」単位で返す（スクロールバー範囲計算用）"""
+        if not self.notes_list:
+            return 0.0
+        max_end_sec = max((n.start_time + n.duration) for n in self.notes_list)
+        return self.seconds_to_beats(max_end_sec)
+
     def set_notes(self, notes: List[Any]) -> None:
         self.notes_list = list(notes or [])
         self._invalidate_note_rects()
