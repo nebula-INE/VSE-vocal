@@ -107,6 +107,28 @@ class VO_SE_Engine:
         except Exception as e:
             print(f"Device error: {e}")
 
+    def set_voice_library(self, path: str) -> None:
+        """音源フォルダを動的に切り替え、oto.ini を再読み込みする"""
+        self.voice_lib_path = path
+        self.refresh_voice_library()
+
+    def set_oto_data(self, oto_data: list) -> None:
+        """oto.ini のパース結果をエンジン側で保持（VCV解決時に使用）"""
+        self.oto_data = oto_data
+
+    def prepare_cache(self, notes: list) -> None:
+        """再生前に波形の先行キャッシュ（現状はスルーでOK。将来的に最適化）"""
+        # スタブ：重い処理を事前に走らせたい場合はここに実装
+        pass
+
+    def export_to_wav_v2(self, notes, params, file_path) -> str:
+        """既存の export_to_wav を呼び出すラッパー（パッチ互換用）"""
+        return self.export_to_wav(notes, params, file_path)
+
+    def set_tempo(self, tempo: float) -> None:
+        """テンポをエンジン内部に保持（現状は何もしないが、将来のDSP用）"""
+        self._tempo = float(tempo)
+
     def _load_core_library(self):
         """OS判別ロード（Win/Mac/Linux対応）"""
         system = platform.system()
