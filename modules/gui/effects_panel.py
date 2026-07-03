@@ -76,7 +76,7 @@ class EffectsPanel(QWidget):
         row = 0
         for name, value in data["params"].items():
             label = QLabel(name)
-            slider = QSlider(Qt.Horizontal)
+            slider = QSlider(Qt.Orientation.Horizontal)
             slider.setRange(0, 1000)
             slider.setValue(int(value * 1000))
             val_label = QLabel(f"{value:.2f}")
