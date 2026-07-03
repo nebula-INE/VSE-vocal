@@ -1472,7 +1472,7 @@ class MainWindow(
         self.active_provider = "CPUExecutionProvider"
         
         self.timeline_widget = cast(Any, None)
-        self.timeline = self.timeline_widget # timelineへのアクセスをwidgetへ流す
+        self.timeline = cast(Any, None)  # ★ setup_main_editor_area() の末尾でエイリアス設定
         self.voice_gallery = cast(Any, None)
         self.current_voice_id = "__INTERNAL__:standard"
 
@@ -2100,6 +2100,9 @@ class MainWindow(
 
         # --- 初期リスト更新 ---
         self.refresh_track_list_ui()
+
+        # ★ ここでエイリアスを設定（ウィジェットが実体化された後）
+        self.timeline = self.timeline_widget
 
     def setup_bottom_panel(self):
         """下部：歌詞入力などのツール"""
