@@ -4867,6 +4867,21 @@ class MainWindow(
         self.timeline_widget._commit_edit(before_snapshot, "オートチューン")
         self.timeline_widget.update()
         self.statusBar().showMessage(f"オートチューン適用: {len(selected)} ノート")
+
+    @Slot(object, object, str)
+    def on_graph_edit_committed(self, before: dict, after: dict, description: str):
+        """グラフエディタの編集を Undo/Redo 履歴に登録"""
+        def redo():
+           self.graph_editor_widget._restore_parameters_snapshot(after)
+        def undo():
+            self.graph_editor_widget._restore_parameters_snapshot(before)
+        self.history.push(EditCommand(redo, undo, description))
+
+    @Slot(str, dict)
+    def on_effect_parameters_changed(self, effect_id: str, params: dict):
+        """エフェクトパラメータ変更時の処理（エンジンに反映）"""
+        # 例: self.vo_se_engine.update_effect(effect_id, params)
+        self.statusBar().showMessage(f"エフェクト更新: {effect_id}", 2000)
     
     @Slot()
     def update_tempo_from_input(self):
