@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 class GraphEditorWidget(QWidget):
     parameters_changed = Signal(dict) 
+    edit_committed_signal = Signal(object, object, str)  # before, after, description
 
     PITCH_MAX = 8191
     PITCH_MIN = -8192
@@ -20,6 +21,7 @@ class GraphEditorWidget(QWidget):
         super().__init__(parent)
         self.setMinimumHeight(150)
         self.setMouseTracking(True)
+        self._edit_snapshot_before = None
         
         self.scroll_x_offset = 0.0
         self.pixels_per_beat = 40.0
@@ -66,6 +68,20 @@ class GraphEditorWidget(QWidget):
             self.update()
         except Exception:
             pass
+
+    def _snapshot_parameters(self) -> dict:
+        return copy.deepcopy(self.all_parameters)
+
+    def _restore_parameters_snapshot(self, snapshot: dict) -> None:
+        self.all_parameters = copy.deepcopy(snapshot)
+        self.update()
+
+    def _commit_edit(self, before_snapshot: Optional[dict], description: str) -> None:
+        if before_snapshot is None:
+            return
+        after = self._snapshot_parameters()
+        if before_snapshot != after:
+            self.edit_committed_signal.emit(before_snapshot, after, description)
 
     def set_vertical_offset(self, offset: int) -> None:
         """現状のGraphEditorでは未使用だが互換のため保持。"""
