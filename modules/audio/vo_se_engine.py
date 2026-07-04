@@ -1,4 +1,5 @@
 import ctypes
+from typing import Optional 
 import os
 import platform
 import numpy as np
