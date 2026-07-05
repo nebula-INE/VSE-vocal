@@ -106,15 +106,20 @@ private:
             const auto& n = notes[i];
             pathRefs.push_back (n.wavPath.toUTF8());
 
+            // vose_core.h の NoteEvent は非const の double* を要求する
+            // (レガシーC ABIでconst性が付いていない)。execute_render側は
+            // これらのカーブを読み取り専用で使うだけなので const_cast で対応する。
             cNotes[i].wav_path             = pathRefs.back().getAddress();
-            cNotes[i].pitch_curve          = n.pitchCurve.data();
+            cNotes[i].pitch_curve          = const_cast<double*> (n.pitchCurve.data());
             cNotes[i].pitch_length         = (int) n.pitchCurve.size();
-            cNotes[i].gender_curve         = n.genderCurve.data();
-            cNotes[i].tension_curve        = n.tensionCurve.data();
-            cNotes[i].breath_curve         = n.breathCurve.data();
+            cNotes[i].gender_curve         = const_cast<double*> (n.genderCurve.data());
+            cNotes[i].tension_curve        = const_cast<double*> (n.tensionCurve.data());
+            cNotes[i].breath_curve         = const_cast<double*> (n.breathCurve.data());
             cNotes[i].vibrato_depth_curve  = nullptr; // フェーズ1ではビブラート未対応
             cNotes[i].vibrato_rate_curve   = nullptr;
             cNotes[i].vibrato_curve_length = 0;
+            cNotes[i].portamento_offsets   = nullptr; // フェーズ1ではポルタメント未対応
+            cNotes[i].portamento_length    = 0;
         }
 
         auto tempFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
