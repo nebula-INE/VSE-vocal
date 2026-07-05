@@ -8,6 +8,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "VoseBridge.h"
 #include "StreamingVoice.h"
+#include "OtoDatabase.h"
 
 class VoseAudioProcessor : public juce::AudioProcessor
 {
@@ -36,17 +37,31 @@ public:
     void getStateInformation (juce::MemoryBlock&) override {}
     void setStateInformation (const void*, int) override {}
 
+    // エディタ(UI)から呼ばれる。音源フォルダを選び直すたびに
+    // oto.iniの再パース + load_embedded_resource + set_oto_data をやり直す。
+    void loadVoiceDirectory (const juce::File& dir);
+    int  getLoadedAliasCount() const { return otoDb.size(); }
+
+    // テスト用の歌詞をUIから変更できるようにする（フェーズ2 PoC）。
+    // MIDIノート名からの歌詞バインドはフェーズ2後半のTODO。
+    void setTestLyric (const juce::String& lyric) { testLyric = lyric; }
+    juce::String getTestLyric() const { return testLyric; }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     // MIDIノートオンに応じて streaming API へノートを積む。
-    // 歌詞バインドはフェーズ2まで固定のテスト音源を使う。
+    // oto.ini解決済みのaliasを wav_path (音源キー) として渡す。
     void pushTestNote (int midiNoteNumber);
 
     VoseCoreLibrary coreLib;
     StreamingVoice  voice;
+    OtoDatabase     otoDb;
+
+    juce::String testLyric { "a" };
+    juce::String lastResolvedVowel; // VCV解決用に前ノートの末尾母音を保持（フェーズ2簡易版）
 
     // pull() が要求サンプル数より少なく返した場合に備えたスクラッチバッファ
     juce::AudioBuffer<float> pullScratch;
