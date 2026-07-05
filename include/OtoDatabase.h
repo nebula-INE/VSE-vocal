@@ -21,6 +21,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_core/juce_core.h>
 #include "VoseBridge.h"
+#include "TextEncoding.h"
 #include <map>
 #include <cstring>
 
@@ -243,22 +244,16 @@ private:
         return true;
     }
 
-    // Shift-JIS(cp932) / UTF-8(BOM) / UTF-8 / latin-1 の順で試すPython版と同じ方針。
-    // JUCEはcp932を標準サポートしないため、BOM付きUTF-8→UTF-8→cp932相当のラテン1フォールバックの順にする。
+    // Shift-JIS(cp932) / UTF-8(BOM) / UTF-8 / latin-1 の順で試す Python版 (_read_safe)
+    // と同じ方針。実体は TextEncoding.h の decodeAutoEncoding に委譲する
+    // (UTF-8として厳密に妥当か検証 → だめならOS標準APIでCP932変換 → 最終手段でLatin-1素通し)。
     static juce::String readSafe (const juce::File& file)
     {
         juce::MemoryBlock raw;
         if (! file.loadFileAsData (raw))
             return {};
 
-        // UTF-8として妥当ならそれを使う（BOM付きも自動処理される）
-        auto asUtf8 = juce::String::fromUTF8 (static_cast<const char*> (raw.getData()), (int) raw.getSize());
-        if (asUtf8.isNotEmpty())
-            return asUtf8;
-
-        // Shift-JIS(cp932)はJUCE標準にないため、Latin-1相当のバイト→文字マッピングで
-        // 最低限読める形にフォールバックする（記号中心のoto.iniなら実用上問題ないことが多い）。
-        return juce::String (juce::CharPointer_UTF8 (static_cast<const char*> (raw.getData())));
+        return vose_text::decodeAutoEncoding (raw.getData(), raw.getSize());
     }
 
     std::map<juce::String, OtoEntryCpp> db;
