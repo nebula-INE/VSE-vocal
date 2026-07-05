@@ -1,21 +1,22 @@
 // PluginProcessor.h
-// フェーズ1 PoC: MIDIノートオンをトリガーに execute_render をバックグラウンド実行し、
-// 完了したバッファを processBlock でストリーム再生する。
-// 歌詞入力・VCV連携・ストリーミング合成はフェーズ2でここに統合する。
+// フェーズ1 PoC v2: MIDIノートオンで StreamingVoice::pushNote、
+// processBlock で StreamingVoice::pull を直接呼ぶ「本物のリアルタイム再生」版。
+// (旧v1のオフラインバウンス方式は RenderEngine.h に残置、書き出し機能用に転用予定)
 
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
-#include "RenderEngine.h"
+#include "VoseBridge.h"
+#include "StreamingVoice.h"
 
 class VoseAudioProcessor : public juce::AudioProcessor
 {
 public:
     VoseAudioProcessor();
-    ~VoseAudioProcessor() override = default;
+    ~VoseAudioProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
-    void releaseResources() override {}
+    void releaseResources() override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;
@@ -40,18 +41,18 @@ public:
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    // 現在鳴っているMIDIノートに対して、暫定の単一母音（"a"）テスト音源を
-    // execute_render に流し込む。実際の歌詞バインドはフェーズ2で
-    // MIDIノート名パースまたは内蔵歌詞トラックに置き換える。
-    void triggerTestNoteRender (int midiNoteNumber);
+    // MIDIノートオンに応じて streaming API へノートを積む。
+    // 歌詞バインドはフェーズ2まで固定のテスト音源を使う。
+    void pushTestNote (int midiNoteNumber);
 
-    RenderEngine renderEngine;
+    VoseCoreLibrary coreLib;
+    StreamingVoice  voice;
 
-    // 再生用の読み出し位置。オーディオスレッド内でのみ増加させる。
-    std::atomic<int64_t> playbackPosition { 0 };
-    std::atomic<bool> isNotePlaying { false };
+    // pull() が要求サンプル数より少なく返した場合に備えたスクラッチバッファ
+    juce::AudioBuffer<float> pullScratch;
 
-    int lastRenderedMidiNote = -1;
+    int64_t nextNoteId = 1;
+    bool anyNoteHeld = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoseAudioProcessor)
 };
