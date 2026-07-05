@@ -1,0 +1,166 @@
+// RenderEngine.h
+//
+// execute_render は「関数」ではなく「バッチジョブ」（マルチスレッド解析 + ファイル書き出し）
+// なので、絶対にオーディオスレッドから呼んではいけない。
+// このクラスは専用スレッド上でのみ execute_render を実行し、
+// 完了したらレンダリング結果の WAV を juce::AudioSampleBuffer に読み込んで
+// アトミックにポインタを差し替える。processBlock 側はそのポインタを
+// 読むだけ（ロックフリー）。
+
+#pragma once
+
+#include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_audio_basics/juce_audio_basics.h>
+#include <atomic>
+#include <vector>
+#include "VoseBridge.h"
+
+struct VoseNoteInput
+{
+    juce::String wavPath;      // oto_map から解決済みのサンプルパス
+    std::vector<double> pitchCurve;    // Hz
+    std::vector<double> genderCurve;   // 0..1
+    std::vector<double> tensionCurve;  // 0..1
+    std::vector<double> breathCurve;   // 0..1
+};
+
+class RenderEngine : private juce::Thread
+{
+public:
+    RenderEngine() : juce::Thread ("VoseRenderThread") {}
+    ~RenderEngine() override { stopThread (5000); }
+
+    bool loadCore (const juce::File& pluginBinaryDir)
+    {
+        return core.load (pluginBinaryDir);
+    }
+
+    // UIスレッド／MIDIハンドラから呼ぶ。すでにレンダリング中なら
+    // 「もう一度最新の内容で」フラグだけ立てて、今のジョブが終わったら再実行する。
+    void requestRender (std::vector<VoseNoteInput> notesToRender)
+    {
+        {
+            const juce::ScopedLock sl (jobLock);
+            pendingNotes = std::move (notesToRender);
+            hasPendingJob = true;
+        }
+        if (! isThreadRunning())
+            startThread (juce::Thread::Priority::normal);
+        else
+            notify();
+    }
+
+    // processBlock から呼ぶ。ロックフリーでスナップショットを取得する。
+    const juce::AudioBuffer<float>* getRenderedBuffer() const
+    {
+        return readyBuffer.load();
+    }
+
+    bool isRendering() const { return rendering.load(); }
+
+private:
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            std::vector<VoseNoteInput> job;
+            {
+                const juce::ScopedLock sl (jobLock);
+                if (! hasPendingJob)
+                {
+                    // 新しい依頼が来るまで待機（processBlockをブロックしない）
+                }
+                else
+                {
+                    job = std::move (pendingNotes);
+                    hasPendingJob = false;
+                }
+            }
+
+            if (! job.empty())
+            {
+                rendering = true;
+                renderOnThisThread (job);
+                rendering = false;
+            }
+
+            // 待機。requestRender() 内の notify() で早期に起きる。
+            wait (hasPendingJob ? 0 : 200);
+        }
+    }
+
+    void renderOnThisThread (const std::vector<VoseNoteInput>& notes)
+    {
+        if (! core.isLoaded())
+            return;
+
+        // ---- VoseNoteInput -> NoteEvent (C ABI) へ変換 ----
+        // 生ポインタの寿命は execute_render 呼び出しが終わるまで
+        // このスコープ内で保証する（ctypes版の _temp_refs と同じ考え方）。
+        std::vector<NoteEvent> cNotes (notes.size());
+        std::vector<juce::CharPointer_UTF8> pathRefs; // wav_path の寿命確保用
+        pathRefs.reserve (notes.size());
+
+        for (size_t i = 0; i < notes.size(); ++i)
+        {
+            const auto& n = notes[i];
+            pathRefs.push_back (n.wavPath.toUTF8());
+
+            cNotes[i].wav_path             = pathRefs.back().getAddress();
+            cNotes[i].pitch_curve          = n.pitchCurve.data();
+            cNotes[i].pitch_length         = (int) n.pitchCurve.size();
+            cNotes[i].gender_curve         = n.genderCurve.data();
+            cNotes[i].tension_curve        = n.tensionCurve.data();
+            cNotes[i].breath_curve         = n.breathCurve.data();
+            cNotes[i].vibrato_depth_curve  = nullptr; // フェーズ1ではビブラート未対応
+            cNotes[i].vibrato_rate_curve   = nullptr;
+            cNotes[i].vibrato_curve_length = 0;
+        }
+
+        auto tempFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                            .getChildFile ("vose_render_" + juce::String (juce::Random::getSystemRandom().nextInt64()) + ".wav");
+
+        // mode_flag=0 (無料版相当: 16bit)。Pro切り替えはパラメータ化して後で渡す。
+        core.execute_render (cNotes.data(), (int) cNotes.size(),
+                              tempFile.getFullPathName().toRawUTF8(), 0);
+
+        loadRenderedFile (tempFile);
+        tempFile.deleteFile();
+    }
+
+    void loadRenderedFile (const juce::File& wavFile)
+    {
+        if (! wavFile.existsAsFile())
+            return;
+
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader (fm.createReaderFor (wavFile));
+        if (reader == nullptr)
+            return;
+
+        auto* newBuffer = new juce::AudioBuffer<float> ((int) reader->numChannels,
+                                                          (int) reader->lengthInSamples);
+        reader->read (newBuffer, 0, (int) reader->lengthInSamples, 0, true, true);
+
+        // 古いバッファは即座に delete せず、次にどこからも参照されなくなってから解放する。
+        // ここでは簡略化のため、直前のバッファを一世代だけ保持して差し替える。
+        auto* old = readyBuffer.exchange (newBuffer);
+        buffersPendingDeletion.add (old); // GC的に、次のレンダリング完了時にまとめて破棄
+        while (buffersPendingDeletion.size() > 2)
+        {
+            delete buffersPendingDeletion.getFirst();
+            buffersPendingDeletion.remove (0);
+        }
+    }
+
+    VoseCoreLibrary core;
+
+    juce::CriticalSection jobLock;
+    std::vector<VoseNoteInput> pendingNotes;
+    bool hasPendingJob = false;
+
+    std::atomic<bool> rendering { false };
+    std::atomic<juce::AudioBuffer<float>*> readyBuffer { nullptr };
+    juce::Array<juce::AudioBuffer<float>*> buffersPendingDeletion;
+};
