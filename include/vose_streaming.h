@@ -1,103 +1,107 @@
-// vose_streaming.h
-// ============================================================
-// VOSE Streaming Synthesis API
+// StreamingVoice.h
 //
-// 設計思想:
-//   UTAUは「全ノートを確定 → まとめてレンダリング → 再生」という
-//   バッチモデルを採用している。これは編集中の即時プレビューや
-//   ライブパフォーマンスに対応できない根本的な制約である。
+// vose_core の本物のリアルタイムAPI (streaming_render_*) を使う。
+// RenderEngine.h (オフラインバウンス方式) と違い、ここでは自前の
+// バックグラウンドスレッドを持たない。合成スレッドは vose_core 内部の
+// StreamingSynthesizer::synth_loop が既にやってくれていて、
+// pull() は SPSC ロックフリー RingBuffer から読むだけなので
+// processBlock から直接呼んでも安全。
 //
-//   このモジュールは「ノートが入力された瞬間に合成を開始し、
-//   再生カーソルより N ms 先行して PCM を供給し続ける」
-//   ストリーミングモデルを実現する。
-//
-//   主要コンポーネント:
-//     1. StreamingSynthesizer  … ノートキューと合成スレッドを管理
-//     2. RingBuffer<T>         … lock-free で生産者/消費者を分離
-//     3. NoteQueue             … mutex付きの安全なノート追加・更新
-//
-//   スレッド構成:
-//     [呼び出し側スレッド]
-//       streaming_render_push_note()  … ノートを随時追加
-//       streaming_render_pull()       … 合成済みPCMを取り出す
-//     [合成スレッド (内部)]
-//       先行バッファ残量を監視し、不足したら次ノートを合成して
-//       RingBuffer に書き込む
-// ============================================================
+// 用途の切り分け:
+//   - リアルタイム再生・プレビュー → StreamingVoice (このファイル)
+//   - 完成音声のバウンス/書き出し   → RenderEngine.h (execute_render)
+//   どちらも同じ synthesize_note_impl を通るので音質は同一。
 
 #pragma once
-#include <cstdint>
 
-#ifdef _WIN32
-  #define DLLEXPORT __declspec(dllexport)
-#else
-  #define DLLEXPORT __attribute__((visibility("default")))
-#endif
+#include "VoseBridge.h"
+#include <juce_audio_basics/juce_audio_basics.h>
 
-// ストリーミングセッションの不透明ハンドル
-typedef void* VoseStreamHandle;
+class StreamingVoice
+{
+public:
+    // core は呼び出し側（プロセッサ）が所有するライブラリ参照を渡す。
+    // サンプルレートが決まる prepareToPlay 以降でのみ start() を呼ぶこと。
+    bool start (VoseCoreLibrary& coreLib, double sampleRate, int bufferMs = 500)
+    {
+        core = &coreLib;
+        stop(); // 既存があれば破棄してから作り直す
 
-// ストリーミング設定
-struct VoseStreamConfig {
-    int    sample_rate;          // 出力サンプルレート (通常 44100)
-    int    buffer_ms;            // 先行バッファ量 [ms] (推奨: 200〜500)
-    int    mode_flag;            // 0=Free(16bit), 1=Pro(32bit)
-    float  initial_tempo_bpm;   // 初期テンポ（後から変更可）
+        if (! core->supportsStreaming())
+            return false;
 
-    // コールバック: 合成スレッドが PCM チャンクを生成するたびに呼ばれる
-    // samples     : float[] のPCMデータ (モノラル, [-1.0, 1.0])
-    // sample_count: サンプル数
-    // position_ms : このチャンクのストリーム先頭からのタイムスタンプ [ms]
-    // user_data   : 下記 callback_user_data がそのまま渡される
-    void (*on_chunk_ready)(const float* samples, int sample_count,
-                           double position_ms, void* user_data);
-    void* callback_user_data;
+        VoseStreamConfig cfg {};
+        cfg.sample_rate        = (int) sampleRate;
+        cfg.buffer_ms          = bufferMs;
+        cfg.mode_flag          = 0; // 0=Free(16bit)。Pro版切替はフェーズ2でパラメータ化
+        cfg.initial_tempo_bpm  = 120.0f;
+        cfg.on_chunk_ready     = nullptr; // フェーズ1ではUI向け解析コールバックは未使用
+        cfg.callback_user_data = nullptr;
+
+        handle = core->streaming_render_create (&cfg);
+        return handle != nullptr;
+    }
+
+    void stop()
+    {
+        if (handle != nullptr && core != nullptr && core->streaming_render_destroy != nullptr)
+            core->streaming_render_destroy (handle);
+        handle = nullptr;
+    }
+
+    ~StreamingVoice() { stop(); }
+
+    // MIDIノートオン等から呼ぶ。カーブは note_id ごとに寿命管理する必要はなく、
+    // push_note の呼び出し中にコアが内部コピー(QueuedNote)するので、
+    // この関数を抜けた後にベクタが破棄されても問題ない。
+    void pushNote (int64_t noteId, const juce::String& wavPath,
+                   const std::vector<double>& pitchCurve,
+                   const std::vector<double>& genderCurve,
+                   const std::vector<double>& tensionCurve,
+                   const std::vector<double>& breathCurve)
+    {
+        if (handle == nullptr || core == nullptr || core->streaming_render_push_note == nullptr)
+            return;
+
+        VoseStreamNote n {};
+        n.note_id            = noteId;
+        n.wav_path           = wavPath.toRawUTF8();
+        n.pitch_length       = (int) pitchCurve.size();
+        n.pitch_curve        = pitchCurve.data();
+        n.gender_curve       = genderCurve.data();
+        n.tension_curve      = tensionCurve.data();
+        n.breath_curve       = breathCurve.data();
+        n.portamento_offsets = nullptr; // フェーズ1では未対応
+        n.portamento_length  = 0;
+
+        core->streaming_render_push_note (handle, &n);
+    }
+
+    // processBlock から直接呼ぶ。ロックフリーなので待たない。
+    // 戻り値は実際に読み出せたサンプル数（バッファ枯渇時は要求数より少ない）。
+    int pull (float* dst, int numSamples)
+    {
+        if (handle == nullptr || core == nullptr || core->streaming_render_pull == nullptr)
+            return 0;
+        return core->streaming_render_pull (handle, dst, numSamples);
+    }
+
+    double getBufferedMs() const
+    {
+        if (handle == nullptr || core == nullptr || core->streaming_render_buffered_ms == nullptr)
+            return 0.0;
+        return core->streaming_render_buffered_ms (handle);
+    }
+
+    void setTempo (float bpm)
+    {
+        if (handle != nullptr && core != nullptr && core->streaming_render_set_tempo != nullptr)
+            core->streaming_render_set_tempo (handle, bpm);
+    }
+
+    bool isActive() const { return handle != nullptr; }
+
+private:
+    VoseCoreLibrary* core = nullptr;
+    VoseStreamHandle handle = nullptr;
 };
-
-// ノートイベント（ストリーミング用。execute_render の NoteEvent と互換）
-struct VoseStreamNote {
-    const char*   wav_path;       // 音源キー (oto.ini alias)
-    int           pitch_length;   // ピッチフレーム数
-    const double* pitch_curve;    // ピッチカーブ [pitch_length]
-    const double* gender_curve;   // ジェンダーカーブ [pitch_length]  (null = 0.5)
-    const double* tension_curve;  // テンションカーブ [pitch_length]  (null = 0.5)
-    const double* breath_curve;   // ブレスカーブ [pitch_length]      (null = 0.5)
-    int64_t       note_id;        // 呼び出し側が管理するID（更新/削除に使用）
-
-    const double* portamento_offsets;   // ピッチオフセットカーブ（セント単位）
-    int           portamento_length;    // 配列長（0 なら無効）
-};
-
-// ============================================================
-// C API
-// ============================================================
-extern "C" {
-
-// セッション作成
-// config の on_chunk_ready が null の場合は pull モード (streaming_render_pull を使う)
-DLLEXPORT VoseStreamHandle streaming_render_create(const VoseStreamConfig* config);
-
-// ノートをキューに追加
-// note_id が既存のIDと同じ場合は「そのノート以降を差し替え」する
-// → カーソル位置より未来のノートをリアルタイム編集できる
-DLLEXPORT void streaming_render_push_note(VoseStreamHandle h,
-                                          const VoseStreamNote* note);
-
-// 合成済みPCMサンプルを取り出す (pull モード用)
-// out_buf     : 呼び出し側が確保した float[] バッファ
-// max_samples : out_buf の容量
-// 戻り値      : 実際に書き込んだサンプル数 (0 = まだ合成中)
-DLLEXPORT int  streaming_render_pull(VoseStreamHandle h,
-                                     float* out_buf, int max_samples);
-
-// 現在の先行バッファ残量 [ms] を返す
-// この値が buffer_ms を上回るまでは pull で0が返る
-DLLEXPORT double streaming_render_buffered_ms(VoseStreamHandle h);
-
-// テンポをリアルタイム変更 (次ノートの合成から反映)
-DLLEXPORT void streaming_render_set_tempo(VoseStreamHandle h, float bpm);
-
-// セッション破棄 (合成スレッドを安全に停止)
-DLLEXPORT void streaming_render_destroy(VoseStreamHandle h);
-
-} // extern "C"
