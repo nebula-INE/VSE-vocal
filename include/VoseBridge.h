@@ -7,6 +7,12 @@
 // #pragma pack(push, 8) ... #pragma pack(pop) に囲まれているため、
 // ここでも同じ pack(8) 指定を忘れないこと（忘れるとフィールドオフセットが
 // ズレて即クラッシュする）。
+//
+// VoseStreamConfig / VoseStreamNote は include/vose_streaming.h の実体が
+// まだテキストで確認できていないため、src/vose_streaming_final.cpp の
+// 使用箇所（cfg.sample_rate, cfg.buffer_ms, n.note_id, n.wav_path 等）から
+// 逆算した「推定」レイアウトです。vose_streaming.h の実物が手に入ったら
+// 必ず置き換えること。フィールド順が違うとやはり即クラッシュします。
 
 #pragma once
 
@@ -49,18 +55,50 @@ struct NoteEvent {
     double*     vibrato_rate_curve;
     int         vibrato_curve_length;
 
-    // vose_core.h の末尾に追加されたポルタメント用フィールド。
-    // フェーズ1では portamento_offsets=nullptr, portamento_length=0 で無効化。
     double*     portamento_offsets;
     int         portamento_length;
 };
 
 #pragma pack(pop)
 
+// ------------------------------------------------------------------
+// ★推定★ ストリーミングAPI用構造体 (include/vose_streaming.h相当)
+//
+// vose_streaming_final.cpp 内で観測されたフィールド使用:
+//   cfg.sample_rate, cfg.buffer_ms, cfg.initial_tempo_bpm,
+//   cfg.on_chunk_ready(chunk, length, position_ms, user_data), cfg.callback_user_data
+//   n.note_id, n.pitch_length, n.wav_path, n.pitch_curve, n.gender_curve,
+//   n.tension_curve, n.breath_curve, n.portamento_offsets, n.portamento_length
+// ------------------------------------------------------------------
+using VoseChunkCallback = void (*) (const float* chunk, int length,
+                                     double position_ms, void* user_data);
+
+struct VoseStreamConfig {
+    int    sample_rate;
+    int    buffer_ms;
+    float  initial_tempo_bpm;
+    VoseChunkCallback on_chunk_ready;   // nullptrで無効化可
+    void*  callback_user_data;
+};
+
+struct VoseStreamNote {
+    int64_t     note_id;
+    const char* wav_path;
+    int         pitch_length;
+    const double* pitch_curve;
+    const double* gender_curve;
+    const double* tension_curve;
+    const double* breath_curve;
+    const double* portamento_offsets;
+    int           portamento_length;
+};
+
+using VoseStreamHandle = void*;
+
 } // extern "C"
 
 // ============================================================
-// 関数ポインタ型（vose_core.h の extern "C" ブロックと1:1対応）
+// 関数ポインタ型（vose_core.h / vose_streaming.h の extern "C" ブロックと1:1対応）
 // ============================================================
 using Fn_load_embedded_resource = void  (*)(const char*, const int16_t*, int);
 using Fn_execute_render         = void  (*)(NoteEvent*, int, const char*, int);
@@ -68,11 +106,17 @@ using Fn_set_vocal_timeline     = void  (*)(const VoseFrame*, int);
 using Fn_get_engine_version     = float (*)();
 using Fn_clear_engine_cache     = void  (*)();
 
-// vose_core.cpp 実装側にのみ存在する補助関数（ヘッダには型宣言がないため、
-// 存在しない環境でも落ちないよう getFunction が nullptr を返す前提で扱う）
 using Fn_init_official_engine   = void (*)();
 using Fn_set_oto_data           = void (*)(const OtoEntry*, int);
 using Fn_set_bigvgan_model      = void (*)(const char*);
+
+// --- ストリーミングAPI（src/vose_streaming_final.cpp）---
+using Fn_streaming_render_create      = VoseStreamHandle (*)(const VoseStreamConfig*);
+using Fn_streaming_render_push_note   = void   (*)(VoseStreamHandle, const VoseStreamNote*);
+using Fn_streaming_render_pull        = int    (*)(VoseStreamHandle, float*, int);
+using Fn_streaming_render_buffered_ms = double (*)(VoseStreamHandle);
+using Fn_streaming_render_set_tempo   = void   (*)(VoseStreamHandle, float);
+using Fn_streaming_render_destroy     = void   (*)(VoseStreamHandle);
 
 // ============================================================
 // VoseCoreLibrary
@@ -94,9 +138,6 @@ public:
         const char* libName = "libvose_core.so";
        #endif
 
-        // 探索候補: プラグイン本体と同じフォルダ、bin/ サブフォルダ
-        // (CMakeLists.txt の LIBRARY_OUTPUT_DIRECTORY が bin/ なので、
-        //  開発中はここに直接置かれることが多い)
         juce::Array<juce::File> candidates {
             pluginBinaryDir.getChildFile (libName),
             pluginBinaryDir.getChildFile ("bin").getChildFile (libName)
@@ -112,12 +153,22 @@ public:
                 get_engine_version     = (Fn_get_engine_version)     dll.getFunction ("get_engine_version");
                 clear_engine_cache     = (Fn_clear_engine_cache)     dll.getFunction ("clear_engine_cache");
 
-                // vose_core.h には宣言のない補助シンボル。存在すれば使う。
                 init_official_engine   = (Fn_init_official_engine)   dll.getFunction ("init_official_engine");
                 set_oto_data           = (Fn_set_oto_data)           dll.getFunction ("set_oto_data");
                 set_bigvgan_model      = (Fn_set_bigvgan_model)      dll.getFunction ("set_bigvgan_model");
 
+                streaming_render_create      = (Fn_streaming_render_create)      dll.getFunction ("streaming_render_create");
+                streaming_render_push_note   = (Fn_streaming_render_push_note)   dll.getFunction ("streaming_render_push_note");
+                streaming_render_pull        = (Fn_streaming_render_pull)        dll.getFunction ("streaming_render_pull");
+                streaming_render_buffered_ms = (Fn_streaming_render_buffered_ms) dll.getFunction ("streaming_render_buffered_ms");
+                streaming_render_set_tempo   = (Fn_streaming_render_set_tempo)   dll.getFunction ("streaming_render_set_tempo");
+                streaming_render_destroy     = (Fn_streaming_render_destroy)     dll.getFunction ("streaming_render_destroy");
+
                 loaded = (execute_render != nullptr);
+                hasStreamingApi = (streaming_render_create != nullptr &&
+                                   streaming_render_pull   != nullptr &&
+                                   streaming_render_destroy != nullptr);
+
                 if (loaded && init_official_engine != nullptr)
                     init_official_engine();
 
@@ -131,6 +182,7 @@ public:
     }
 
     bool isLoaded() const { return loaded; }
+    bool supportsStreaming() const { return hasStreamingApi; }
     float getLastKnownVersion() const { return lastKnownVersion; }
 
     Fn_load_embedded_resource load_embedded_resource = nullptr;
@@ -143,8 +195,16 @@ public:
     Fn_set_oto_data           set_oto_data           = nullptr;
     Fn_set_bigvgan_model      set_bigvgan_model      = nullptr;
 
+    Fn_streaming_render_create      streaming_render_create      = nullptr;
+    Fn_streaming_render_push_note   streaming_render_push_note   = nullptr;
+    Fn_streaming_render_pull        streaming_render_pull        = nullptr;
+    Fn_streaming_render_buffered_ms streaming_render_buffered_ms = nullptr;
+    Fn_streaming_render_set_tempo   streaming_render_set_tempo   = nullptr;
+    Fn_streaming_render_destroy     streaming_render_destroy     = nullptr;
+
 private:
     juce::DynamicLibrary dll;
     bool  loaded = false;
+    bool  hasStreamingApi = false;
     float lastKnownVersion = 0.0f;
 };
