@@ -5,14 +5,25 @@ VoseAudioProcessor::VoseAudioProcessor()
     : juce::AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMS", createParameterLayout())
 {
-    // vose_core をプラグインバイナリと同じフォルダから探索してロードする。
     auto pluginDir = juce::File::getSpecialLocation (juce::File::currentApplicationFile)
                           .getParentDirectory();
-    if (! renderEngine.loadCore (pluginDir))
+    if (! coreLib.load (pluginDir))
+        coreLib.load (juce::File::getCurrentWorkingDirectory());
+
+    if (coreLib.isLoaded() && ! coreLib.supportsStreaming())
     {
-        // フォールバック: 開発中はカレントディレクトリも見る
-        renderEngine.loadCore (juce::File::getCurrentWorkingDirectory());
+        // ビルドされている vose_core が古く streaming_render_* を
+        // エクスポートしていない場合はここに来る。
+        // その場合は RenderEngine.h のオフラインバウンス方式にフォールバックすること
+        // (このPoCではまだ未接続。TODOフェーズ2)。
+        juce::Logger::writeToLog ("VO-SE: vose_core loaded but no streaming API found. "
+                                   "Rebuild vose_core with vose_streaming_final.cpp linked.");
     }
+}
+
+VoseAudioProcessor::~VoseAudioProcessor()
+{
+    voice.stop();
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout VoseAudioProcessor::createParameterLayout()
@@ -20,8 +31,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoseAudioProcessor::createPa
     using Param = juce::AudioParameterFloat;
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
-    // vo_se_engine.py の parameters["Gender"] / ["Tension"] / ["Breath"] に対応。
-    // 0.5 = 変化なし、というvose_core側の規約(apply_gender_shift)に合わせてデフォルト0.5。
     params.push_back (std::make_unique<Param> (juce::ParameterID { "gender", 1 }, "Gender",
                                                 juce::NormalisableRange<float> (0.0f, 1.0f), 0.5f));
     params.push_back (std::make_unique<Param> (juce::ParameterID { "tension", 1 }, "Tension",
@@ -32,32 +41,37 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoseAudioProcessor::createPa
     return { params.begin(), params.end() };
 }
 
-void VoseAudioProcessor::prepareToPlay (double, int)
+void VoseAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    playbackPosition = 0;
-    isNotePlaying = false;
+    pullScratch.setSize (2, samplesPerBlock);
+    anyNoteHeld = false;
+
+    // StreamingSynthesizer はサンプルレート依存の内部バッファ(RingBuffer)を
+    // コンストラクタで確保するので、サンプルレートが分かるここで作り直す。
+    if (coreLib.supportsStreaming())
+        voice.start (coreLib, sampleRate, /*bufferMs*/ 500);
 }
 
-void VoseAudioProcessor::triggerTestNoteRender (int midiNoteNumber)
+void VoseAudioProcessor::releaseResources()
 {
-    if (midiNoteNumber == lastRenderedMidiNote)
-        return; // 同じノートで再レンダリングは無駄なので抑制
-    lastRenderedMidiNote = midiNoteNumber;
+    voice.stop();
+}
 
+void VoseAudioProcessor::pushTestNote (int midiNoteNumber)
+{
     const double hz = 440.0 * std::pow (2.0, (midiNoteNumber - 69) / 12.0);
     constexpr int kRes = 128;
 
-    VoseNoteInput note;
     // TODO(フェーズ2): oto_map 相当の解決をC++側に実装するまでは、
     // 開発用の固定サンプルパスをここに置く。
-    note.wavPath = "voices/default/a.wav";
-    note.pitchCurve.assign (kRes, hz);
-    note.genderCurve.assign (kRes, (double) apvts.getRawParameterValue ("gender")->load());
-    note.tensionCurve.assign (kRes, (double) apvts.getRawParameterValue ("tension")->load());
-    note.breathCurve.assign (kRes, (double) apvts.getRawParameterValue ("breath")->load());
+    static const juce::String kTestWavPath = "voices/default/a.wav";
 
-    renderEngine.requestRender ({ note });
-    playbackPosition = 0;
+    std::vector<double> pitchCurve (kRes, hz);
+    std::vector<double> genderCurve (kRes, (double) apvts.getRawParameterValue ("gender")->load());
+    std::vector<double> tensionCurve (kRes, (double) apvts.getRawParameterValue ("tension")->load());
+    std::vector<double> breathCurve (kRes, (double) apvts.getRawParameterValue ("breath")->load());
+
+    voice.pushNote (nextNoteId++, kTestWavPath, pitchCurve, genderCurve, tensionCurve, breathCurve);
 }
 
 void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -65,50 +79,42 @@ void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
 
-    // ---- MIDI処理: ここではファイルI/Oも解析も一切行わない。 ----
-    // 重い処理(execute_render)は triggerTestNoteRender 経由で
-    // 別スレッドに投げるだけで、processBlock 自体は即座に戻る。
+    // ---- MIDI処理: pushNote は内部で streaming_render_push_note を呼ぶだけで、
+    // 合成そのものは vose_core 側のワーカースレッドが行う。ここはノンブロッキング。
     for (const auto metadata : midi)
     {
         const auto msg = metadata.getMessage();
         if (msg.isNoteOn())
         {
-            triggerTestNoteRender (msg.getNoteNumber());
-            isNotePlaying = true;
+            pushTestNote (msg.getNoteNumber());
+            anyNoteHeld = true;
         }
         else if (msg.isNoteOff())
         {
-            isNotePlaying = false;
+            anyNoteHeld = false;
         }
     }
 
-    if (! isNotePlaying.load())
+    if (! voice.isActive())
         return;
 
-    const auto* rendered = renderEngine.getRenderedBuffer();
-    if (rendered == nullptr || rendered->getNumSamples() == 0)
-        return; // まだレンダリング中。無音を返して待つ。
-
     const int numOut = buffer.getNumSamples();
-    const int srcChannels = rendered->getNumChannels();
-    int64_t pos = playbackPosition.load();
+
+    // pull() はモノラルPCMを返す前提（RingBuffer<float>1本）。
+    // ステレオ出力には両チャンネルへ同じ値を複製する。
+    pullScratch.setSize (1, numOut, false, false, true);
+    float* mono = pullScratch.getWritePointer (0);
+
+    const int got = voice.pull (mono, numOut);
+    if (got <= 0)
+        return; // まだバッファが埋まっていない（発音直後など）。無音で待つ。
 
     for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
     {
-        const float* src = rendered->getReadPointer (juce::jmin (ch, srcChannels - 1));
         float* dst = buffer.getWritePointer (ch);
-
-        for (int i = 0; i < numOut; ++i)
-        {
-            const int64_t srcIdx = pos + i;
-            dst[i] = (srcIdx < rendered->getNumSamples()) ? src[srcIdx] : 0.0f;
-        }
+        for (int i = 0; i < got; ++i)
+            dst[i] = mono[i];
     }
-
-    pos += numOut;
-    if (pos >= rendered->getNumSamples())
-        isNotePlaying = false; // 再生し終えたら停止（ループしない）
-    playbackPosition = pos;
 }
 
 juce::AudioProcessorEditor* VoseAudioProcessor::createEditor()
@@ -116,7 +122,6 @@ juce::AudioProcessorEditor* VoseAudioProcessor::createEditor()
     return new VoseAudioProcessorEditor (*this);
 }
 
-// This creates new instances of the plugin
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new VoseAudioProcessor();
