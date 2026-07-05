@@ -8,11 +8,8 @@
 // ここでも同じ pack(8) 指定を忘れないこと（忘れるとフィールドオフセットが
 // ズレて即クラッシュする）。
 //
-// VoseStreamConfig / VoseStreamNote は include/vose_streaming.h の実体が
-// まだテキストで確認できていないため、src/vose_streaming_final.cpp の
-// 使用箇所（cfg.sample_rate, cfg.buffer_ms, n.note_id, n.wav_path 等）から
-// 逆算した「推定」レイアウトです。vose_streaming.h の実物が手に入ったら
-// 必ず置き換えること。フィールド順が違うとやはり即クラッシュします。
+// VoseStreamConfig / VoseStreamNote は include/vose_streaming.h の実物を
+// 反映済み（2026-07-05確定）。フィールド順が1つでも変わったら必ず追従すること。
 
 #pragma once
 
@@ -62,35 +59,32 @@ struct NoteEvent {
 #pragma pack(pop)
 
 // ------------------------------------------------------------------
-// ★推定★ ストリーミングAPI用構造体 (include/vose_streaming.h相当)
-//
-// vose_streaming_final.cpp 内で観測されたフィールド使用:
-//   cfg.sample_rate, cfg.buffer_ms, cfg.initial_tempo_bpm,
-//   cfg.on_chunk_ready(chunk, length, position_ms, user_data), cfg.callback_user_data
-//   n.note_id, n.pitch_length, n.wav_path, n.pitch_curve, n.gender_curve,
-//   n.tension_curve, n.breath_curve, n.portamento_offsets, n.portamento_length
+// ストリーミングAPI用構造体 (include/vose_streaming.h と1:1対応)
+// フィールド順は実物のヘッダの順序を厳守すること。
 // ------------------------------------------------------------------
-using VoseChunkCallback = void (*) (const float* chunk, int length,
+using VoseChunkCallback = void (*) (const float* samples, int sample_count,
                                      double position_ms, void* user_data);
 
 struct VoseStreamConfig {
-    int    sample_rate;
-    int    buffer_ms;
-    float  initial_tempo_bpm;
-    VoseChunkCallback on_chunk_ready;   // nullptrで無効化可
+    int    sample_rate;          // 出力サンプルレート (通常 44100)
+    int    buffer_ms;             // 先行バッファ量 [ms] (推奨: 200〜500)
+    int    mode_flag;             // 0=Free(16bit), 1=Pro(32bit)
+    float  initial_tempo_bpm;    // 初期テンポ（後から変更可）
+    VoseChunkCallback on_chunk_ready; // nullptrならpullモード
     void*  callback_user_data;
 };
 
 struct VoseStreamNote {
-    int64_t     note_id;
-    const char* wav_path;
-    int         pitch_length;
-    const double* pitch_curve;
-    const double* gender_curve;
-    const double* tension_curve;
-    const double* breath_curve;
-    const double* portamento_offsets;
-    int           portamento_length;
+    const char*   wav_path;       // 音源キー (oto.ini alias)
+    int           pitch_length;   // ピッチフレーム数
+    const double* pitch_curve;    // [pitch_length]
+    const double* gender_curve;   // [pitch_length] (null = 0.5)
+    const double* tension_curve;  // [pitch_length] (null = 0.5)
+    const double* breath_curve;   // [pitch_length] (null = 0.5)
+    int64_t       note_id;        // 更新/差し替えに使用するID
+
+    const double* portamento_offsets; // セント単位。nullptr可
+    int           portamento_length;  // 0なら無効
 };
 
 using VoseStreamHandle = void*;
