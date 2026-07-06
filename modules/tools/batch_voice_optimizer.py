@@ -25,7 +25,7 @@ import soundfile as sf
 from scipy import signal
 from scipy.fft import rfft, rfftfreq
 from scipy.signal import find_peaks, lfilter
-from scipy.linalg import solve_toeplitz
+from scipy.linalg import solve_toeplitz, solve
 from sklearn.preprocessing import StandardScaler
 
 # ─── オプション依存関係 ────────────────────────────────────────────────
@@ -187,7 +187,8 @@ class FormantTracker:
     def _formants_from_cepstrum(self, x: np.ndarray) -> np.ndarray:
         """ケプストラム法によるフォルマント推定（補助）"""
         n_fft = 1024
-        spec = np.abs(np.fft.rfft(x * np.hanning(len(x)), n_fft))
+        _, _, spec_complex = signal.stft(x, fs=sr, nperseg=n_fft, noverlap=n_fft - hop, window='hann')
+        spec = np.abs(spec_complex)
         log_spec = np.log(spec + 1e-10)
         ceps = np.fft.irfft(log_spec)
         # リフタリング
