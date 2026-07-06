@@ -11,7 +11,7 @@ import json
 import hashlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import multiprocessing
 
 import numpy as np
