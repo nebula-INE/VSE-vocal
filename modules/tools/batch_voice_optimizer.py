@@ -101,7 +101,7 @@ class BatchVoiceOptimizer:
     # ================================================================
     @staticmethod
     def _analyze_cpu(wav_path: str, target_sr: int = 16000) -> OtoParams:
-        # 1. 高速読み込み（soundfile）
+        # 1. 高速読み込み（キャストで型を明示）
         raw_data = sf.read(wav_path, always_2d=False)
         data, sr = cast(Tuple[np.ndarray, int], raw_data)
         
@@ -111,31 +111,28 @@ class BatchVoiceOptimizer:
 
         # 2. ダウンサンプリング
         if sr != target_sr:
-            x = signal.resample(x, int(len(x) * target_sr / sr))
+            x = cast(np.ndarray, signal.resample(x, int(len(x) * target_sr / sr)))
             sr = target_sr
 
         # 3. ベクトル化フレーム抽出（5msフレーム）
-        # 型推論が迷子になりやすいため、明示的にndarrayとして扱う
+        frame_len = int(sr * 0.005)
+        hop = frame_len // 2
+        if frame_len < 1:
+            frame_len = 1
+            hop = 1
+        n_frames = max(1, (len(x) - frame_len) // hop + 1)
+
         view = np.lib.stride_tricks.sliding_window_view(x, frame_len)[::hop]
-        frames = cast(np.ndarray, view) 
+        frames = cast(np.ndarray, view)
         frames = frames[:n_frames].astype(np.float64)
 
         # 4. 特徴抽出
         rms = np.sqrt(np.mean(frames ** 2, axis=1))
         signs = np.sign(frames)
-        # zcrの算出でエラーが出る場合は以下の通り型を抑制
-        zcr = np.mean(np.abs(np.diff(signs, axis=1)) / 2.0, axis=1) / frame_len # type: ignore
+        # 演算子のオーバーロードによる型推論エラーを無視
+        zcr = np.mean(np.abs(np.diff(signs, axis=1)) / 2.0, axis=1) / frame_len  # type: ignore
 
-        # rfftの推論エラー対策
-        fft_vals = np.abs(rfft(frames, axis=1)) # type: ignore
-        freqs = rfftfreq(frame_len, d=1.0 / sr)
-        spectral_centroid = np.sum(freqs * fft_vals, axis=1) / (np.sum(fft_vals, axis=1) + 1e-8)
-        # 4. 特徴抽出
-        rms = np.sqrt(np.mean(frames ** 2, axis=1))
-        signs = np.sign(frames)
-        zcr = np.mean(np.abs(np.diff(signs, axis=1)) / 2.0, axis=1) / frame_len
-
-        fft_vals = np.abs(rfft(frames, axis=1))
+        fft_vals = np.abs(rfft(frames, axis=1))  # type: ignore
         freqs = rfftfreq(frame_len, d=1.0 / sr)
         spectral_centroid = np.sum(freqs * fft_vals, axis=1) / (np.sum(fft_vals, axis=1) + 1e-8)
 
