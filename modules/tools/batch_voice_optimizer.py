@@ -860,6 +860,11 @@ class BatchVoiceOptimizer:
                         rms_vals.append(np.sqrt(np.mean(seg ** 2)))
                 if rms_vals:
                     rms_arr = np.array(rms_vals)
+                        if len(rms_arr) > 0:
+                            target = 0.8 * np.max(rms_arr)
+                            idx_80 = np.argmax(rms_arr >= target) if np.any(rms_arr >= target) else len(rms_arr) // 2
+                            stable_ms = (search_start + idx_80 * frame_len) / sr * 1000
+                            params.preutter = float(np.clip(stable_ms, 10, 400))
                     target = 0.8 * np.max(rms_arr)
                     idx_80 = np.argmax(rms_arr >= target) if np.any(rms_arr >= target) else len(rms_arr) // 2
                     stable_ms = (search_start + idx_80 * frame_len) / sr * 1000
