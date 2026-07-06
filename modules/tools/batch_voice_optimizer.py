@@ -881,6 +881,7 @@ class BatchVoiceOptimizer:
 
         # preutter補正（RMSが80%に達する点）
         peak_idx = np.argmax(env_smooth)
+        peak_idx = np.argmax(env_smooth)
         if peak_idx > 0:
             search_start = max(0, int(params.offset * sr / 1000.0))
             search_end = min(peak_idx + int(sr * 0.1), len(x))
@@ -891,13 +892,14 @@ class BatchVoiceOptimizer:
                     seg = x[i:i + frame_len]
                     if len(seg) > 0:
                         rms_vals.append(np.sqrt(np.mean(seg ** 2)))
+                
                 if rms_vals:
                     rms_arr = np.array(rms_vals)
-                        if len(rms_arr) > 0:
-                            target = 0.8 * np.max(rms_arr)
-                            idx_80 = np.argmax(rms_arr >= target) if np.any(rms_arr >= target) else len(rms_arr) // 2
-                            stable_ms = (search_start + idx_80 * frame_len) / sr * 1000
-                            params.preutter = float(np.clip(stable_ms, 10, 400))
+                    if len(rms_arr) > 0:
+                        target = 0.8 * np.max(rms_arr)
+                        idx_80 = np.argmax(rms_arr >= target) if np.any(rms_arr >= target) else len(rms_arr) // 2
+                        stable_ms = (search_start + idx_80 * frame_len) / sr * 1000
+                        params.preutter = float(np.clip(stable_ms, 10, 400))
                     target = 0.8 * np.max(rms_arr)
                     idx_80 = np.argmax(rms_arr >= target) if np.any(rms_arr >= target) else len(rms_arr) // 2
                     stable_ms = (search_start + idx_80 * frame_len) / sr * 1000
