@@ -369,7 +369,8 @@ class PhonemeRecognizer:
         n_fft = 512
         hop = 128
         n_mels = 40
-        spec = np.abs(np.stft(x, n_fft=n_fft, hop_length=hop, window='hann')[2])
+        _, _, spec_complex = signal.stft(x, fs=sr, nperseg=n_fft, noverlap=n_fft - hop, window='hann')
+        spec = np.abs(spec_complex)
         # 簡易メルフィルタバンク（実際はlibrosa推奨）
         mel_basis = self._mel_filterbank(sr, n_fft, n_mels)
         mel_spec = mel_basis @ spec
@@ -652,6 +653,8 @@ class OtoPredictor:
             self.model = RandomForestRegressor(n_estimators=100, max_depth=12, random_state=42)
             self.model.fit(X_scaled, y)
 
+        self._training_X = X
+        self._training_y = y
         self.is_trained = True
 
     def predict(self, features: AcousticFeatures) -> OtoParams:
