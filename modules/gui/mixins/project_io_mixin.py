@@ -518,20 +518,65 @@ class ProjectIOMixin:
         except Exception as e:
             QMessageBox.critical(self, "導入エラー", f"インストール中にエラーが発生しました:\n{str(e)}")
 
-    def generate_and_save_oto(self: Any, target_voice_dir):
-        """[LIVE] WAV解析 → oto.ini生成"""
+    def generate_and_save_oto(self: Any, target_voice_dir: str, force_redo: bool = False) -> None:
+        """
+        [超高速化・並列処理版] WAV解析 → oto.ini生成
+        - CPU全コアを使用した並列処理（ProcessPoolExecutor）
+        - ダウンサンプリング＆ベクトル化FFTで演算を爆速化
+        - 2回目以降はキャッシュから瞬時に復元（変更検知機能付き）
+        """
+        try:
+            from modules.tools.batch_voice_optimizer import BatchVoiceOptimizer
+        except ImportError:
+            # 万一モジュールが存在しない場合のフォールバック（旧ロジック警告）
+            print("⚠️ BatchVoiceOptimizer not found. Falling back to legacy single-core mode.")
+            self._legacy_generate_oto(target_voice_dir)
+            return
+
+        # 1. ステータスバーの更新（UIフィードバック）
+        status_bar = self.statusBar() if hasattr(self, "statusBar") else None
+        if status_bar:
+            status_bar.showMessage(
+                f"⚡ 超高速原音解析中（{multiprocessing.cpu_count()}コア並列）...",
+                0  # タイムアウトなし（永続表示）
+            )
+
+        # 2. オプティマイザーのインスタンス化（キャッシュディレクトリはデフォルトでOK）
+        optimizer = BatchVoiceOptimizer(target_sr=16000)
+
+        # 3. 並列バッチ実行（force_redo=Trueならキャッシュを無視して再解析）
+        print(f"[VO-SE] 音源フォルダをスキャン中: {target_voice_dir}")
+        results = optimizer.optimize_voice_bank(target_voice_dir, force_redo=force_redo)
+
+        # 4. 結果の書き出し
+        if results:
+            BatchVoiceOptimizer.export_oto_ini(target_voice_dir, results)
+            msg = f"✅ oto.ini 生成完了！ ({len(results)} エントリ / キャッシュ利用含む)"
+            print(msg)
+            if status_bar:
+                status_bar.showMessage(msg, 5000)  # 5秒間表示
+        else:
+            msg = "⚠️ 解析対象のWAVファイルが見つからないか、全ての解析に失敗しました。"
+            print(msg)
+            if status_bar:
+                status_bar.showMessage(msg, 5000)
+
+    # ================================================================
+    # 旧ロジックのフォールバック（緊急時・モジュール欠落時）
+    # ================================================================
+    def _legacy_generate_oto(self: Any, target_voice_dir: str) -> None:
+        """旧来の逐次処理版（バックアップ用）"""
         from modules.gui.main_window import AutoOtoEngine
-        
+
         analyzer = AutoOtoEngine(sample_rate=44100)
         oto_lines = []
         files = [f for f in os.listdir(target_voice_dir) if f.lower().endswith('.wav')]
-        
+
         if not files:
             print("解析対象のWAVファイルが見つかりませんでした。")
             return
 
-        print(f"Starting AI analysis for {len(files)} files...")
-
+        print(f"Starting legacy analysis for {len(files)} files (single-core)...")
         for filename in files:
             file_path = os.path.join(target_voice_dir, filename)
             try:
@@ -545,7 +590,7 @@ class ProjectIOMixin:
         try:
             with open(oto_path, "w", encoding="cp932", errors="ignore") as f:
                 f.write("\n".join(oto_lines))
-            print(f"Successfully generated: {oto_path}")
+            print(f"Successfully generated (legacy): {oto_path}")
         except Exception as e:
             print(f"Failed to write oto.ini: {e}")
 
