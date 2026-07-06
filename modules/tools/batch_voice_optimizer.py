@@ -17,19 +17,16 @@ import hashlib
 import pickle
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, asdict, field
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 import multiprocessing
-from collections import defaultdict
 
 import numpy as np
 import soundfile as sf
 from scipy import signal
 from scipy.fft import rfft, rfftfreq
-from scipy.signal import find_peaks, butter, filtfilt, lfilter
+from scipy.signal import find_peaks, lfilter
 from scipy.linalg import solve_toeplitz
-from scipy.interpolate import interp1d
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
 
 # ─── オプション依存関係 ────────────────────────────────────────────────
 try:
@@ -691,7 +688,6 @@ class OtoPredictor:
         if XGB_AVAILABLE and isinstance(self.model, xgb.XGBRegressor):
             self.model.fit(X_scaled, y, xgb_model=self.model)
         else:
-            from sklearn.ensemble import RandomForestRegressor
             combined_X = np.vstack([self.scaler.transform(self._training_X), X_scaled])
             combined_y = np.vstack([self._training_y, y])
             self.model.fit(combined_X, combined_y)
