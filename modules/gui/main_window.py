@@ -782,7 +782,7 @@ class AutoOtoEngine:
     def _get_envelope(self, x: np.ndarray, sr: int) -> np.ndarray:
         """ヒルベルト変換による解析信号の包絡線（より正確な振幅変動）"""
         analytic = hilbert(x)  # type: ignore
-        envelope: np.ndarray = np.abs(analytic)
+        envelope: np.ndarray = np.abs(analytic) # type: ignore
         # 移動平均で平滑化（5ms窓）
         win = int(sr * 0.005)
         if win < 1:
@@ -829,7 +829,7 @@ class AutoOtoEngine:
         frames_windowed = frames * window
         
         # FFT（バッチ処理）
-        fft_vals = np.abs(rfft(frames_windowed, axis=1))
+        fft_vals = np.abs(rfft(frames_windowed, axis=1)) # type: ignore
         freqs = rfftfreq(frame_len, d=1.0/sr).astype(np.float64)
         
         # 重心計算（分母がゼロの場合は0）
