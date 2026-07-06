@@ -679,84 +679,221 @@ class SynthesisWorker(QRunnable):
 
 
 class AutoOtoEngine:
+    """高度な音響特徴量（スペクトル・減衰率）を利用した適応型oto.iniジェネレーター"""
+
     def __init__(self, sample_rate=44100):
         self.sample_rate = sample_rate
+        # ノイズフロア判定閾値（-50dB）
+        self.noise_floor_db = -50.0
 
-    def analyze_wav(self, file_path):
+    def analyze_wav(self, file_path: str) -> Dict[str, float]:
         """
-        WAVファイルを解析して、UTAU形式のパラメータを返す。
-        音量エンベロープに加え、ゼロ交差率(ZCR)を用いて子音と母音の境界を特定する。
+        WAVを解析し、音声学的に最適化されたotoパラメータを返す。
+        戻り値: offset, preutter, overlap, constant, blank (全てms単位)
         """
-        import numpy as np
+        samples, sr = self._load_wav(file_path)
+        if len(samples) == 0:
+            return self._fallback_params()
 
-        with wave.open(file_path, 'rb') as f:
-            sr = f.getframerate()
-            n_frames = f.getnframes()
-            frames = f.readframes(n_frames)
-            # ステレオの場合はモノラル化して処理
-            samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
-            if f.getnchannels() == 2:
-                samples = samples.reshape(-1, 2).mean(axis=1)
-
-        # 1. 振幅のエンベロープ計算（既存ロジック）
-        win_size = int(sr * 0.01) # 10ms
-        envelope = np.convolve(np.abs(samples), np.ones(win_size)/win_size, mode='same')
-        max_amp = np.max(envelope) if np.max(envelope) > 0 else 1.0
-
-        # 2. オフセット (Offset): 無音を除去し、音が立ち上がる地点
-        # 閾値を少し下げて(2%)、小さな子音も拾えるようにします
-        start_indices = np.where(envelope > max_amp * 0.02)[0]
-        start_idx = start_indices[0] if len(start_indices) > 0 else 0
-        offset_ms = (start_idx / sr) * 1000
-
-        # 3. 先行発声 (Pre-utterance) の精密解析 【ここを大幅修正】
-        # 子音(摩擦音など)は波形の符号が頻繁に入れ替わるため、ゼロ交差率が高い。
-        # 母音に入ると波形が安定し、ゼロ交差率が急落する。
+        # 1. 基本エンベロープ（振幅）の計算
+        envelope = self._get_envelope(samples, sr)
         
-        # 5msごとの窓でZCRを計算
-        zcr_win = int(sr * 0.005) 
-        zcr = []
-        # start_idxから500msの範囲を調査
-        search_range = samples[start_idx : start_idx + int(sr * 0.5)]
-        for i in range(0, len(search_range) - zcr_win, zcr_win):
-            window = search_range[i : i + zcr_win]
-            # 符号反転回数をカウント
-            crossings = np.sum(np.abs(np.diff(np.sign(window)))) / 2
-            zcr.append(crossings / zcr_win)
-
-        # ZCRが急激に減少した（高周波成分が減り、母音が始まった）地点を探す
-        zcr_diff = np.diff(zcr)
-        # argmin(zcr_diff) は最も減少率が高いインデックス
-        zcr_drop_idx = np.argmin(zcr_diff) * zcr_win if len(zcr_diff) > 0 else 0
+        # 2. 時間領域特徴量（ZCR）と周波数領域特徴量（スペクトル重心）の抽出
+        zcr = self._get_zcr(samples, sr)
+        spectral_centroid = self._get_spectral_centroid(samples, sr)
         
-        # 音量増加率の最大点（既存ロジック）
-        vol_diff = np.diff(envelope[start_idx : start_idx + int(sr * 0.5)])
-        vol_accel_idx = np.argmax(vol_diff) if len(vol_diff) > 0 else 0
+        # 3. 音の立ち上がり（Offset）の検出（従来の2%閾値を維持）
+        offset_idx = self._detect_onset(envelope)
+        offset_ms = (offset_idx / sr) * 1000.0
 
-        # ZCRの落下点と音量の急増点を統合して先行発声を決定
-        # 子音の種類によって重みを変えるのが理想ですが、まずは平均的な位置を採用
-        preutter_idx = (zcr_drop_idx + vol_accel_idx) // 2
-        preutter_ms = (preutter_idx / sr) * 1000
+        # 4. ★核心改善①: 子音の種類をスペクトル重心とZCRの組み合わせで分類
+        #   分析区間: 立ち上がりから 50ms 後までの領域
+        analysis_end = min(offset_idx + int(sr * 0.05), len(samples))
+        if analysis_end - offset_idx < 10:
+            consonant_type = "unvoiced_stop"  # 極短い無声破裂音（デフォルト）
+        else:
+            # その区間の平均スペクトル重心（Hz）と平均ZCRを算出
+            mean_centroid = np.mean(spectral_centroid[offset_idx:analysis_end])
+            mean_zcr = np.mean(zcr[offset_idx:analysis_end])
+            
+            # 判定ロジック（日本語音声学に基づく経験則）
+            if mean_centroid > 5500 and mean_zcr > 0.35:
+                consonant_type = "fricative"      # 摩擦音 (s, sh, h, f)
+            elif mean_centroid > 3000 and mean_zcr > 0.25:
+                consonant_type = "affricate"       # 破擦音 (ts, ch, j)
+            elif mean_centroid < 1500 and mean_zcr < 0.15:
+                consonant_type = "voiced_stop"     # 有声破裂音 (b, d, g)
+            else:
+                consonant_type = "unvoiced_stop"   # 無声破裂音 (k, t, p) およびその他
 
-        # 4. オーバーラップ (Overlap) と 固定範囲 (Constant)
-        # オーバーラップは先行発声の1/3〜1/2が一般的
-        overlap_ms = preutter_ms / 3 
-        # 固定範囲は先行発声の少し先まで（母音が安定するまで）
-        constant_ms = preutter_ms * 1.5
+        # 5. ★核心改善②: 先行発声（Preutterance）の決定
+        #   母音が安定するポイント = スペクトル重心が急激に下降し、ZCRが閾値を下回る地点
+        stable_vowel_idx = self._detect_vowel_stability(envelope, zcr, spectral_centroid, offset_idx, sr)
+        preutter_ms = ((stable_vowel_idx - offset_idx) / sr) * 1000.0
+        
+        # 安全ガード（極端に短い/長い場合の補正）
+        preutter_ms = np.clip(preutter_ms, 10.0, 350.0)
+
+        # 6. ★核心改善③: 子音種別に応じたオーバーラップと固定範囲の最適値
+        #   オーバーラップ = 先行発声の長さ × 子音別係数
+        if consonant_type == "fricative":
+            overlap_ratio = 0.25   # 摩擦音は重ねるとノイズが強調されるので短め
+            constant_ratio = 1.2
+        elif consonant_type == "affricate":
+            overlap_ratio = 0.35
+            constant_ratio = 1.4
+        elif consonant_type == "voiced_stop":
+            overlap_ratio = 0.45   # 有声破裂音は声帯振動が入るので長めに取る
+            constant_ratio = 1.6
+        else:  # unvoiced_stop / その他
+            overlap_ratio = 0.4
+            constant_ratio = 1.5
+
+        overlap_ms = preutter_ms * overlap_ratio
+        constant_ms = preutter_ms * constant_ratio
+
+        # 7. ★核心改善④: 右ブランクを動的に計算（固定-10msを廃止）
+        #   末尾から遡ってRMSがノイズフロアを超えなくなる地点を検出
+        blank_ms = self._calc_dynamic_blank(samples, sr)
 
         return {
             "offset": int(offset_ms),
             "preutter": int(preutter_ms),
             "overlap": int(overlap_ms),
             "constant": int(constant_ms),
-            "blank": -10 
+            "blank": int(blank_ms)  # 負の値を取ることも許容
         }
 
-    def generate_oto_text(self, wav_name, params):
-        """1行分のoto.iniテキストを生成"""
-        alias = os.path.splitext(wav_name)[0]
-        return f"{wav_name}={alias},{params['offset']},{params['constant']},{params['blank']},{params['preutter']},{params['overlap']}"
+    # ========================================================================
+    # 内部ヘルパーメソッド（詳細実装）
+    # ========================================================================
 
+    def _load_wav(self, path: str) -> Tuple[np.ndarray, int]:
+        with wave.open(path, 'rb') as f:
+            sr = f.getframerate()
+            nch = f.getnchannels()
+            frames = f.readframes(f.getnframes())
+            data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+            if nch == 2:
+                data = data[::2]  # モノラル化
+            return data, sr
+
+    def _get_envelope(self, x: np.ndarray, sr: int) -> np.ndarray:
+        """ヒルベルト変換による解析信号の包絡線（より正確な振幅変動）"""
+        analytic = hilbert(x)
+        envelope = np.abs(analytic)
+        # 移動平均で平滑化（5ms窓）
+        win = int(sr * 0.005)
+        kernel = np.ones(win) / win
+        return np.convolve(envelope, kernel, mode='same')
+
+    def _get_zcr(self, x: np.ndarray, sr: int) -> np.ndarray:
+        """フレーム単位のゼロ交差率（5msフレーム）"""
+        frame_len = int(sr * 0.005)
+        zcr = np.array([
+            np.sum(np.abs(np.diff(np.sign(x[i:i+frame_len])))) / (2 * frame_len)
+            for i in range(0, len(x) - frame_len, frame_len)
+        ])
+        # 元の長さに補間して戻す
+        return np.interp(np.arange(len(x)), 
+                         np.linspace(0, len(x), len(zcr)), zcr)
+
+    def _get_spectral_centroid(self, x: np.ndarray, sr: int) -> np.ndarray:
+        """フレームごとのスペクトル重心（周波数の重み付き平均）"""
+        frame_len = int(sr * 0.01)  # 10ms窓（周波数分解能を確保）
+        hop = frame_len // 2
+        centroids = []
+        for start in range(0, len(x) - frame_len, hop):
+            frame = x[start:start+frame_len] * np.hanning(frame_len)
+            fft_vals = np.abs(rfft(frame))
+            freqs = rfftfreq(frame_len, 1/sr)
+            if np.sum(fft_vals) > 1e-6:
+                centroid = np.sum(freqs * fft_vals) / np.sum(fft_vals)
+            else:
+                centroid = 0.0
+            centroids.append(centroid)
+        return np.interp(np.arange(len(x)), 
+                         np.linspace(0, len(x), len(centroids)), centroids)
+
+    def _detect_onset(self, envelope: np.ndarray) -> int:
+        """振幅が最大値の2%を超える最初のインデックス（従来ロジック維持）"""
+        threshold = np.max(envelope) * 0.02
+        idx = np.argmax(envelope > threshold)
+        return max(0, idx)
+
+    def _detect_vowel_stability(self, envelope: np.ndarray, zcr: np.ndarray, 
+                                centroid: np.ndarray, onset_idx: int, sr: int) -> int:
+        """
+        母音安定点の検出:
+        1. 音量が最大値の70%以上に達したポイント
+        2. ZCRが0.2を下回る
+        3. スペクトル重心の変動率（微分）が最小になる地点
+        の3条件を合成。
+        """
+        search_range = slice(onset_idx, min(onset_idx + int(sr * 0.3), len(envelope)))
+        
+        # 条件1: 音量到達
+        vol_condition = envelope[search_range] > (np.max(envelope) * 0.7)
+        
+        # 条件2: ZCR閾値
+        zcr_condition = zcr[search_range] < 0.2
+        
+        # 条件3: 重心の変動が最小になるインデックス（微分の絶対値が最小）
+        centroid_diff = np.abs(np.diff(centroid[search_range]))
+        if len(centroid_diff) > 0:
+            stable_idx_in_range = np.argmin(centroid_diff)
+        else:
+            stable_idx_in_range = len(envelope[search_range]) // 2
+
+        # 3条件の重み付け統合（経験則: 重心変動を最も重視）
+        start_idx = search_range.start
+        for i in range(len(envelope[search_range])):
+            idx = start_idx + i
+            if (vol_condition[i] and zcr_condition[i] and i >= stable_idx_in_range):
+                return idx
+        
+        # フォールバック（検出できない場合は中央値）
+        return start_idx + len(envelope[search_range]) // 2
+
+    def _calc_dynamic_blank(self, x: np.ndarray, sr: int) -> float:
+        """
+        末尾のRMSを計算し、ノイズフロア（-50dB）を下回った時点を検出。
+        その地点を「末尾からの距離」として負のブランク値を返す。
+        """
+        frame_len = int(sr * 0.01)
+        # 末尾から遡る（最大1秒まで）
+        search_len = min(len(x), sr * 1)
+        if search_len < frame_len:
+            return -5.0  # 短すぎる場合はデフォルト
+
+        rms = np.array([
+            np.sqrt(np.mean(x[-i-frame_len:-i if i>0 else None]**2))
+            for i in range(0, search_len, frame_len)
+        ])
+        
+        # ノイズフロア（dB）を線形値に変換
+        noise_floor_linear = 10 ** (self.noise_floor_db / 20)
+        
+        # RMSがノイズフロアを下回る最初のインデックス（末尾から何フレーム前か）
+        below_noise = np.argmax(rms < noise_floor_linear)
+        if below_noise == 0 and rms[0] > noise_floor_linear:
+            # ノイズフロアに達しない場合は末尾-10msでカット（従来の安全策）
+            return -10.0
+        
+        # 負のブランク値（ms）を計算（末尾からの距離）
+        blank_ms = - (below_noise * frame_len / sr) * 1000.0
+        return max(blank_ms, -200.0)  # 最大-200msまでに制限
+
+    def _fallback_params(self) -> Dict[str, float]:
+        """WAV読み込み失敗時のデフォルト値"""
+        return {"offset": 0, "preutter": 50, "overlap": 20, "constant": 70, "blank": -10}
+
+    def generate_oto_text(self, wav_name: str, params: Dict[str, float]) -> str:
+        """改良版パラメータをoto.ini一行形式に変換"""
+        alias = os.path.splitext(wav_name)[0]
+        return (f"{wav_name}={alias},"
+                f"{params['offset']:.0f},{params['constant']:.0f},"
+                f"{params['blank']:.0f},{params['preutter']:.0f},{params['overlap']:.0f}")
 
     
 #----------
