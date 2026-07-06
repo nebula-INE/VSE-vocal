@@ -27,6 +27,8 @@ from scipy.fft import rfft, rfftfreq
 from scipy.signal import find_peaks, lfilter
 from scipy.linalg import solve_toeplitz, solve
 from sklearn.preprocessing import StandardScaler
+import logging
+logger = logging.getLogger("VO-SE-vocal")
 
 # ─── オプション依存関係 ────────────────────────────────────────────────
 try:
@@ -187,7 +189,7 @@ class FormantTracker:
     def _formants_from_cepstrum(self, x: np.ndarray) -> np.ndarray:
         """ケプストラム法によるフォルマント推定（補助）"""
         n_fft = 1024
-        _, _, spec_complex = signal.stft(x, fs=sr, nperseg=n_fft, noverlap=n_fft - hop, window='hann')
+        _, _, spec_complex = signal.stft(x, fs=self.sr, nperseg=n_fft, noverlap=n_fft - hop, window='hann')
         spec = np.abs(spec_complex)
         log_spec = np.log(spec + 1e-10)
         ceps = np.fft.irfft(log_spec)
