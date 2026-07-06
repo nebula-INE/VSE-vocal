@@ -10,6 +10,7 @@ import json
 import ctypes
 import threading
 import math
+from typing import Tuple
 from copy import deepcopy
 from scipy.signal import hilbert
 from scipy.fft import rfft, rfftfreq
@@ -780,80 +781,121 @@ class AutoOtoEngine:
 
     def _get_envelope(self, x: np.ndarray, sr: int) -> np.ndarray:
         """ヒルベルト変換による解析信号の包絡線（より正確な振幅変動）"""
-        analytic = hilbert(x)
-        envelope = np.abs(analytic)
+        analytic = hilbert(x)  # type: ignore
+        envelope: np.ndarray = np.abs(analytic)
         # 移動平均で平滑化（5ms窓）
         win = int(sr * 0.005)
-        kernel = np.ones(win) / win
+        if win < 1:
+            win = 1
+        kernel = np.ones(win, dtype=np.float64) / win
         return np.convolve(envelope, kernel, mode='same')
 
     def _get_zcr(self, x: np.ndarray, sr: int) -> np.ndarray:
-        """フレーム単位のゼロ交差率（5msフレーム）"""
+        """フレーム単位のゼロ交差率（5msフレーム） - ベクトル化版"""
         frame_len = int(sr * 0.005)
-        zcr = np.array([
-            np.sum(np.abs(np.diff(np.sign(x[i:i+frame_len])))) / (2 * frame_len)
-            for i in range(0, len(x) - frame_len, frame_len)
-        ])
+        if frame_len < 1:
+            frame_len = 1
+        n_frames = max(1, (len(x) - frame_len) // frame_len + 1)
+        
+        # 各フレームを抽出（ビュー）
+        frames = np.lib.stride_tricks.sliding_window_view(x, frame_len)[::frame_len]
+        frames = frames[:n_frames]  # 端数調整
+        
+        # ゼロ交差率をベクトル計算
+        signs = np.sign(frames).astype(np.float64)
+        diff_signs = np.abs(np.diff(signs, axis=1)) / 2.0
+        zcr_frame = np.sum(diff_signs, axis=1) / frame_len
+        
         # 元の長さに補間して戻す
-        return np.interp(np.arange(len(x)), 
-                         np.linspace(0, len(x), len(zcr)), zcr)
+        if len(zcr_frame) < 2:
+            return np.zeros_like(x, dtype=np.float64)
+        x_axis = np.linspace(0, len(x), len(zcr_frame))
+        return np.interp(np.arange(len(x), dtype=np.float64), x_axis, zcr_frame.astype(np.float64))
 
     def _get_spectral_centroid(self, x: np.ndarray, sr: int) -> np.ndarray:
-        """フレームごとのスペクトル重心（周波数の重み付き平均）"""
-        frame_len = int(sr * 0.01)  # 10ms窓（周波数分解能を確保）
-        hop = frame_len // 2
-        centroids = []
-        for start in range(0, len(x) - frame_len, hop):
-            frame = x[start:start+frame_len] * np.hanning(frame_len)
-            fft_vals = np.abs(rfft(frame))
-            freqs = rfftfreq(frame_len, 1/sr)
-            if np.sum(fft_vals) > 1e-6:
-                centroid = np.sum(freqs * fft_vals) / np.sum(fft_vals)
-            else:
-                centroid = 0.0
-            centroids.append(centroid)
-        return np.interp(np.arange(len(x)), 
-                         np.linspace(0, len(x), len(centroids)), centroids)
+        """フレームごとのスペクトル重心（周波数の重み付き平均） - ベクトル化版"""
+        frame_len = int(sr * 0.01)  # 10ms窓
+        if frame_len < 1:
+            frame_len = 1
+        hop = max(1, frame_len // 2)
+        n_frames = max(1, (len(x) - frame_len) // hop + 1)
+        
+        # フレーム抽出（ビュー）
+        frames = np.lib.stride_tricks.sliding_window_view(x, frame_len)[::hop]
+        frames = frames[:n_frames]
+        
+        # ハニング窓を適用
+        window = np.hanning(frame_len).astype(np.float64)
+        frames_windowed = frames * window
+        
+        # FFT（バッチ処理）
+        fft_vals = np.abs(rfft(frames_windowed, axis=1))
+        freqs = rfftfreq(frame_len, d=1.0/sr).astype(np.float64)
+        
+        # 重心計算（分母がゼロの場合は0）
+        sum_fft = np.sum(fft_vals, axis=1)
+        centroid = np.zeros(len(sum_fft), dtype=np.float64)
+        mask = sum_fft > 1e-6
+        centroid[mask] = np.sum(freqs * fft_vals[mask], axis=1) / sum_fft[mask]
+        
+        # 元の長さに補間
+        if len(centroid) < 2:
+            return np.zeros_like(x, dtype=np.float64)
+        x_axis = np.linspace(0, len(x), len(centroid))
+        return np.interp(np.arange(len(x), dtype=np.float64), x_axis, centroid)
 
     def _detect_onset(self, envelope: np.ndarray) -> int:
-        """振幅が最大値の2%を超える最初のインデックス（従来ロジック維持）"""
-        threshold = np.max(envelope) * 0.02
-        idx = np.argmax(envelope > threshold)
-        return max(0, idx)
+        """振幅が最大値の2%を超える最初のインデックス"""
+        if len(envelope) == 0:
+            return 0
+        threshold = float(np.max(envelope)) * 0.02
+        mask = envelope > threshold
+        idx = np.argmax(mask) if np.any(mask) else 0
+        return int(idx)
 
-    def _detect_vowel_stability(self, envelope: np.ndarray, zcr: np.ndarray, 
-                                centroid: np.ndarray, onset_idx: int, sr: int) -> int:
+    def _detect_vowel_stability(
+        self,
+        envelope: np.ndarray,
+        zcr: np.ndarray,
+        centroid: np.ndarray,
+        onset_idx: int,
+        sr: int
+    ) -> int:
         """
         母音安定点の検出:
         1. 音量が最大値の70%以上に達したポイント
         2. ZCRが0.2を下回る
         3. スペクトル重心の変動率（微分）が最小になる地点
-        の3条件を合成。
         """
-        search_range = slice(onset_idx, min(onset_idx + int(sr * 0.3), len(envelope)))
-        
-        # 条件1: 音量到達
-        vol_condition = envelope[search_range] > (np.max(envelope) * 0.7)
-        
-        # 条件2: ZCR閾値
-        zcr_condition = zcr[search_range] < 0.2
-        
-        # 条件3: 重心の変動が最小になるインデックス（微分の絶対値が最小）
-        centroid_diff = np.abs(np.diff(centroid[search_range]))
-        if len(centroid_diff) > 0:
-            stable_idx_in_range = np.argmin(centroid_diff)
-        else:
-            stable_idx_in_range = len(envelope[search_range]) // 2
+        # 探索範囲（onset_idx から 300ms 後まで）
+        search_end = min(onset_idx + int(sr * 0.3), len(envelope))
+        search_len = search_end - onset_idx
+        if search_len <= 0:
+            return onset_idx
 
-        # 3条件の重み付け統合（経験則: 重心変動を最も重視）
-        start_idx = search_range.start
-        for i in range(len(envelope[search_range])):
-            idx = start_idx + i
-            if (vol_condition[i] and zcr_condition[i] and i >= stable_idx_in_range):
+        # 各条件を配列で評価
+        env_slice = envelope[onset_idx:search_end]
+        zcr_slice = zcr[onset_idx:search_end]
+        cent_slice = centroid[onset_idx:search_end]
+
+        vol_condition = env_slice > (np.max(envelope) * 0.7)
+        zcr_condition = zcr_slice < 0.2
+
+        # 重心の変動が最小になるインデックス
+        if len(cent_slice) > 1:
+            cent_diff = np.abs(np.diff(cent_slice))
+            stable_idx_in_range = int(np.argmin(cent_diff))
+        else:
+            stable_idx_in_range = search_len // 2
+
+        # 3条件を合成（重心変動を最も重視）
+        for i in range(search_len):
+            idx = onset_idx + i
+            if vol_condition[i] and zcr_condition[i] and i >= stable_idx_in_range:
                 return idx
-        
-        # フォールバック（検出できない場合は中央値）
-        return start_idx + len(envelope[search_range]) // 2
+
+        # フォールバック
+        return onset_idx + search_len // 2
 
     def _calc_dynamic_blank(self, x: np.ndarray, sr: int) -> float:
         """
@@ -861,28 +903,33 @@ class AutoOtoEngine:
         その地点を「末尾からの距離」として負のブランク値を返す。
         """
         frame_len = int(sr * 0.01)
+        if frame_len < 1:
+            frame_len = 1
         # 末尾から遡る（最大1秒まで）
         search_len = min(len(x), sr * 1)
         if search_len < frame_len:
-            return -5.0  # 短すぎる場合はデフォルト
+            return -5.0
 
-        rms = np.array([
-            np.sqrt(np.mean(x[-i-frame_len:-i if i>0 else None]**2))
-            for i in range(0, search_len, frame_len)
-        ])
-        
-        # ノイズフロア（dB）を線形値に変換
-        noise_floor_linear = 10 ** (self.noise_floor_db / 20)
-        
-        # RMSがノイズフロアを下回る最初のインデックス（末尾から何フレーム前か）
-        below_noise = np.argmax(rms < noise_floor_linear)
-        if below_noise == 0 and rms[0] > noise_floor_linear:
-            # ノイズフロアに達しない場合は末尾-10msでカット（従来の安全策）
+        # 末尾からフレーム単位でRMSを計算（ベクトル化）
+        n_frames = max(1, search_len // frame_len)
+        rms_vals = np.zeros(n_frames, dtype=np.float64)
+        for i in range(n_frames):
+            start = len(x) - (i + 1) * frame_len
+            end = len(x) - i * frame_len
+            segment = x[start:end]
+            if len(segment) > 0:
+                rms_vals[i] = float(np.sqrt(np.mean(segment.astype(np.float64) ** 2)))
+
+        # ノイズフロア（-50dB）を線形値に変換
+        noise_floor_linear = float(10.0 ** (self.noise_floor_db / 20.0))
+
+        # RMSがノイズフロアを下回る最初のインデックス
+        below_noise = np.argmax(rms_vals < noise_floor_linear)
+        if below_noise == 0 and rms_vals[0] > noise_floor_linear:
             return -10.0
-        
-        # 負のブランク値（ms）を計算（末尾からの距離）
-        blank_ms = - (below_noise * frame_len / sr) * 1000.0
-        return max(blank_ms, -200.0)  # 最大-200msまでに制限
+
+        blank_ms = -(below_noise * frame_len / sr) * 1000.0
+        return max(float(blank_ms), -200.0)
 
     def _fallback_params(self) -> Dict[str, float]:
         """WAV読み込み失敗時のデフォルト値"""
