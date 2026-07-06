@@ -21,8 +21,8 @@ from scipy.fft import rfft, rfftfreq
 
 # --- オプションGPU（CuPy）のロード ---
 try:
-    import cupy as cp
-    import cupyx.scipy.fft as cufft
+    import cupy as cp # type: ignore
+    import cupyx.scipy.fft as cufft # type: ignore
     GPU_AVAILABLE = True
     print("[BatchOptimizer] CuPy detected. GPU acceleration ENABLED.")
 except ImportError:
