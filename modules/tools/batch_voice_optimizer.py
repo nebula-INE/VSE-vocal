@@ -310,57 +310,90 @@ class PhonemeRecognizer:
 
     def recognize(self, x: np.ndarray, sr: int, filename: str = "") -> AcousticFeatures:
         """音声波形から音響特徴量と音素情報を抽出"""
-        # 1. ファイル名からg2p推定
+        # 1. 最終的に格納する変数の初期化（安全のためのデフォルト値）
         phoneme = 'a'
+        consonant = ''
         consonant_type = 'vowel'
         vowel = 'a'
         context_prev = ''
         context_next = ''
 
+        # 2. ファイル名からG2P推定
         if self.use_g2p and filename:
             try:
                 base = os.path.splitext(os.path.basename(filename))[0]
-                # 複数文字の場合は分割して扱う
                 raw = pyopenjtalk.g2p(base, kana=False)
+                
                 if raw:
                     parts = raw.split()
                     if parts:
-                        phoneme = parts[0] if parts[0] not in ('sil', 'pau') else parts[0]
-                        # 子音タイプ判定
+                        # 'sil', 'pau' などの判定をシンプルに
+                        phoneme = parts[0]
+                        
+                        # 子音と子音タイプの判定
                         consonant = ''.join([c for c in phoneme if c not in 'aiueoN'])
-                        consonant_type = self.CONSONANT_TYPES.get(consonant, 'vowel' if not consonant else 'unvoiced_stop')
+                        consonant_type = self.CONSONANT_TYPES.get(
+                            consonant, 
+                            'vowel' if not consonant else 'unvoiced_stop'
+                        )
+                        
                         # 母音抽出
                         vowels = [p for p in parts if p in 'aiueo']
                         vowel = vowels[0] if vowels else 'a'
-                        # 文脈情報（前後の音素）
+                        
+                        # 【重要修正】単一ファイル名処理時の文脈情報バグを修正
+                        context_prev = '' 
                         if len(parts) > 1:
                             context_next = parts[1] if parts[1] not in ('sil', 'pau') else ''
-                        if len(parts) > 0:
-                            context_prev = parts[-2] if len(parts) > 1 else ''
-            except Exception:
-                pass
+                            
+            except Exception as e:
+                # エラーの握りつぶしをやめ、警告を残す
+                logger.warning(f"G2P Processing failed for {filename}: {e}")
 
-        # 2. 音響特徴量抽出
-        features = self._extract_acoustic_features(x, sr)
-        features.phoneme = phoneme
-        features.consonant_type = consonant_type
-        features.vowel = vowel
-        features.context_prev = context_prev
-        features.context_next = context_next
-
-        # 3. CNNによる補正（CNNが利用可能で信頼度が高い場合）
+        # 3. CNNによる補正（波形から推定）
         if self.use_cnn and self.cnn_model is not None:
             try:
                 mel_spec = self._compute_mel_spectrogram(x, sr)
                 with torch.no_grad():
                     mel_tensor = torch.from_numpy(mel_spec).unsqueeze(0).unsqueeze(0).float()
-                    probs = self.cnn_model(mel_tensor)
+                    
+                    if next(self.cnn_model.parameters()).is_cuda:
+                        mel_tensor = mel_tensor.cuda()
+                    
+                    # 【重要修正】生出力(Logits)を確率(0.0〜1.0)に変換するためにSoftmaxを適用
+                    logits = self.cnn_model(mel_tensor)
+                    probs = torch.softmax(logits, dim=1)
+                    
                     pred_idx = torch.argmax(probs, dim=1).item()
-                    if probs[0, pred_idx] > 0.6:
-                        # CNNの予測で上書き（実際には音素ID→ラベルのマッピングが必要）
-                        pass
-            except Exception:
-                pass
+                    confidence = probs[0, pred_idx].item()
+                    
+                    # 確信度が60%を超えた場合のみG2Pの結果を上書き
+                    if confidence > 0.6:
+                        # ★ 音素ID→文字列のマッピング（実際のモデルのクラスと一致させること）
+                        id_to_phoneme = {0: 'a', 1: 'i', 2: 'u', 3: 'e', 4: 'o', 5: 'k', 6: 's'}
+                        cnn_phoneme = id_to_phoneme.get(pred_idx, phoneme)
+                        
+                        if cnn_phoneme != phoneme:
+                            phoneme = cnn_phoneme
+                            consonant = ''.join([c for c in phoneme if c not in 'aiueoN'])
+                            consonant_type = self.CONSONANT_TYPES.get(
+                                consonant, 
+                                'vowel' if not consonant else 'unvoiced_stop'
+                            )
+                            # 必要であればここで vowel も再計算する
+                            
+            except Exception as e:
+                logger.warning(f"CNN Inference failed: {e}")
+
+        # 4. 音響特徴量抽出と最終データの格納
+        # 【重要修正】G2PとCNNの「両方の判定」が終わってから、最終的な情報をセットする
+        features = self._extract_acoustic_features(x, sr)
+        
+        features.phoneme = phoneme
+        features.consonant_type = consonant_type
+        features.vowel = vowel
+        features.context_prev = context_prev
+        features.context_next = context_next
 
         return features
 
