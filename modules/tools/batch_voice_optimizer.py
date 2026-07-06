@@ -7,14 +7,14 @@ import hashlib
 import pickle
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 import multiprocessing
 
 import numpy as np
 import soundfile as sf
 from scipy import signal
 from scipy.fft import rfft, rfftfreq
-from scipy.signal import find_peaks, butter, filtfilt
+from scipy.signal import find_peaks
 from scipy.linalg import toeplitz, solve  # LPC計算用に追記
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
