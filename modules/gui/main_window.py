@@ -11,7 +11,7 @@ import ctypes
 import threading
 import math
 from copy import deepcopy
-from scipy.signal import find_peaks, hilbert
+from scipy.signal import hilbert
 from scipy.fft import rfft, rfftfreq
 from typing import Any, List, Dict, Optional, TYPE_CHECKING, cast
 
