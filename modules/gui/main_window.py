@@ -233,34 +233,42 @@ except ImportError:
 # ==========================================================================
 # 2. C++連携データ変換関数
 # ==========================================================================
-def prepare_c_note_event(python_note: Dict[str, Any]) -> NoteEvent:
+def prepare_c_note_event(python_note: dict) -> CNoteEvent:
     """
     UI上のノート情報(Dict)を、C++が解読可能な NoteEvent 構造体に変換する。
-    ポインタ化の際に cast を使用し、Pylanceの型不整合エラーを回避。
+    返り値の構造体が参照する配列は、呼び出し元（SynthesisWorker）で保持される。
     """
-    # 1. データの確保 (Noneチェックを行い、空リストを回避)
-    pitch_data = python_note.get('pitch_curve') or [0.0]
+    # 1. データの取得（デフォルト値で補完）
+    pitch_data = python_note.get('pitch_curve') or [440.0]
     gender_data = python_note.get('gender_curve') or [0.5] * len(pitch_data)
     tension_data = python_note.get('tension_curve') or [0.5] * len(pitch_data)
     breath_data = python_note.get('breath_curve') or [0.0] * len(pitch_data)
+    vibrato_depth = python_note.get('vibrato_depth_curve') or [0.0] * len(pitch_data)
+    vibrato_rate = python_note.get('vibrato_rate_curve') or [5.5] * len(pitch_data)
 
-    # 2. ctypesによるポインタ化（メモリ確保）
-    # 型ヒント上のエラーを防ぐため、一旦配列として定義してからcastする
-    pitch_arr = (ctypes.c_double * len(pitch_data))(*pitch_data)
-    gender_arr = (ctypes.c_double * len(gender_data))(*gender_data)
-    tension_arr = (ctypes.c_double * len(tension_data))(*tension_data)
-    breath_arr = (ctypes.c_double * len(breath_data))(*breath_data)
+    # 2. ctypes配列に変換
+    pitch_arr = as_c_double_array(pitch_data)
+    gender_arr = as_c_double_array(gender_data)
+    tension_arr = as_c_double_array(tension_data)
+    breath_arr = as_c_double_array(breath_data)
+    vib_depth_arr = as_c_double_array(vibrato_depth)
+    vib_rate_arr = as_c_double_array(vibrato_rate)
 
-    # 3. 構造体の生成と返却
-    # 各 curve 属性にポインタ型を明示的に cast して代入
-    return NoteEvent(
-        wav_path=python_note.get('phoneme', '').encode('utf-8'),
-        pitch_curve=cast(Any, pitch_arr),
-        pitch_length=len(pitch_data),
-        gender_curve=cast(Any, gender_arr),
-        tension_curve=cast(Any, tension_arr),
-        breath_curve=cast(Any, breath_arr)
-        )
+    # 3. 構造体の生成
+    c_event = CNoteEvent()
+    c_event.wav_path = python_note.get('phoneme', 'a').encode('utf-8')
+    c_event.pitch_curve = ctypes.cast(pitch_arr, ctypes.POINTER(ctypes.c_double))
+    c_event.pitch_length = len(pitch_data)
+    c_event.gender_curve = ctypes.cast(gender_arr, ctypes.POINTER(ctypes.c_double))
+    c_event.tension_curve = ctypes.cast(tension_arr, ctypes.POINTER(ctypes.c_double))
+    c_event.breath_curve = ctypes.cast(breath_arr, ctypes.POINTER(ctypes.c_double))
+    c_event.vibrato_depth_curve = ctypes.cast(vib_depth_arr, ctypes.POINTER(ctypes.c_double))
+    c_event.vibrato_rate_curve = ctypes.cast(vib_rate_arr, ctypes.POINTER(ctypes.c_double))
+    c_event.vibrato_curve_length = len(pitch_data)
+
+    # 配列自体は呼び出し元（SynthesisWorker）で keep_alive に保持される
+    return c_event
+
 
 
 # ==========================================================================
