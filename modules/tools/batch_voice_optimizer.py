@@ -216,21 +216,33 @@ class FormantTracker:
             selected.append(0.0)
         return np.array(selected[:self.n_formants])
 
-    def _formants_from_cepstrum(self, x: np.ndarray, hop: int = 256) -> np.ndarray:
-        """ケプストラム法によるフォルマント推定（補助）"""
-        n_fft = 1024
-        _, _, spec_complex = signal.stft(x, fs=self.sr, nperseg=n_fft, noverlap=n_fft - hop, window='hann')
-        spec = np.abs(spec_complex)
+    def _formants_from_cepstrum(self, x: np.ndarray) -> np.ndarray:
+        """ケプストラム法によるフォルマント推定（補助）
+
+        【バグ修正】track() から渡される x は既に窓関数（Hanning）を適用済みの
+        単一フレーム（1フレーム分の波形）である。従来実装は内部で
+        signal.stft(nperseg=1024, ...) を使っており、
+          (a) frame_len(512) < n_fft(1024) のとき scipy が nperseg を自動縮小する一方
+              noverlap は縮小されず ValueError になる
+          (b) 縮小を回避できたとしても STFT は複数時間フレームを返す2次元配列になり、
+              1次元入力を要求する find_peaks に渡すと "x must be a 1-D array" で落ちる
+        という二重のバグを抱えていた。単一フレーム入力に対して「1フレーム→1スペクトル」
+        という意図に忠実な直接FFT（rfft）ベースの実装に置き換えることで両方を解消する。
+        """
+        n = len(x)
+        if n < 2:
+            return np.zeros(self.n_formants)
+        spec = np.abs(np.asarray(rfft(x)))
         log_spec = np.log(spec + 1e-10)
-        ceps = np.fft.irfft(log_spec)
+        ceps = np.fft.irfft(log_spec, n=n)
         # リフタリング
         lifter = np.ones_like(ceps)
         lifter[int(len(ceps) * self.quefrency_lifter):] = 0
         smoothed = np.fft.rfft(ceps * lifter)
         envelope = np.exp(np.real(smoothed))
-        # ピーク検出
+        # ピーク検出（envelopeは常に1次元）
         peaks, _ = find_peaks(envelope, height=np.percentile(envelope, 70), distance=3)
-        freqs = peaks * self.sr / n_fft
+        freqs = peaks * self.sr / n
         selected = []
         for f_min, f_max in self.formant_ranges:
             candidates = freqs[(freqs >= f_min) & (freqs <= f_max)]
