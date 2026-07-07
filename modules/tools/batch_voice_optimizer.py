@@ -25,8 +25,8 @@ import soundfile as sf
 from scipy import signal
 from scipy.fft import rfft, rfftfreq
 from scipy.signal import find_peaks, lfilter
-from scipy.linalg import solve_toeplitz, solve
-from sklearn.preprocessing import StandardScaler
+from scipy.linalg import solve_toeplitz
+from sklearn.preprocessing import StandardScaler  # type: ignore[import-not-found]
 import logging
 logger = logging.getLogger("VO-SE-vocal")
 
@@ -38,15 +38,15 @@ except ImportError:
     PYOPENJTALK_AVAILABLE = False
 
 try:
-    import xgboost as xgb
+    import xgboost as xgb  # type: ignore[import-not-found]
     XGB_AVAILABLE = True
 except ImportError:
     XGB_AVAILABLE = False
 
 try:
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
+    import torch  # type: ignore[import-not-found]
+    import torch.nn as nn  # type: ignore[import-not-found]
+    import torch.nn.functional as F  # type: ignore[import-not-found]
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
@@ -148,15 +148,14 @@ class FormantTracker:
         if len(x) < order:
             return np.zeros(order + 1)
         # プリエンファシス
-        x = lfilter([1.0, -0.97], 1.0, x)
+        x = np.asarray(lfilter([1.0, -0.97], 1.0, x))
         # 自己相関
         r = np.correlate(x, x, mode='full')[len(x)-1:len(x)+order]
         if r[0] == 0:
             return np.zeros(order + 1)
-        # Toeplitz行列を解く
-        R = solve_toeplitz(r[:-1])
+        # Toeplitz方程式を解く（solve_toeplitzは行列生成と解を一度に行う）
         try:
-            a = solve(R, -r[1:], assume_a='pos', check_finite=False)
+            a = solve_toeplitz(r[:-1], -r[1:])
         except Exception:
             return np.zeros(order + 1)
         return np.concatenate(([1.0], a))
@@ -186,7 +185,7 @@ class FormantTracker:
             selected.append(0.0)
         return np.array(selected[:self.n_formants])
 
-    def _formants_from_cepstrum(self, x: np.ndarray) -> np.ndarray:
+    def _formants_from_cepstrum(self, x: np.ndarray, hop: int = 256) -> np.ndarray:
         """ケプストラム法によるフォルマント推定（補助）"""
         n_fft = 1024
         _, _, spec_complex = signal.stft(x, fs=self.sr, nperseg=n_fft, noverlap=n_fft - hop, window='hann')
@@ -466,7 +465,7 @@ class PhonemeRecognizer:
             zcr[i] = np.sum(np.abs(np.diff(np.sign(seg)))) / (2 * len(seg)) if len(seg) > 1 else 0
 
             # FFT
-            fft_vals = np.abs(rfft(windowed))
+            fft_vals = np.abs(np.asarray(rfft(windowed)))
             freqs = rfftfreq(frame_len, d=1 / sr)
             sum_fft = np.sum(fft_vals)
 
@@ -488,7 +487,7 @@ class PhonemeRecognizer:
             prev_fft = fft_vals.copy()
 
         # エンベロープ解析
-        envelope = np.abs(signal.hilbert(x)) if len(x) > 0 else np.zeros_like(x)
+        envelope = np.abs(np.asarray(signal.hilbert(x))) if len(x) > 0 else np.zeros_like(x)
         env_smooth = np.convolve(envelope, np.ones(int(sr * 0.005)) / int(sr * 0.005), mode='same')
         env_diff = np.diff(env_smooth, prepend=0)
         env_accel = np.diff(env_diff, prepend=0)
@@ -530,10 +529,10 @@ class PhonemeRecognizer:
         mfcc = self._compute_mfcc(x, sr)
 
         return AcousticFeatures(
-            onset_time=onset_idx / sr,
-            attack_time=attack_time,
+            onset_time=float(onset_idx / sr),
+            attack_time=float(attack_time),
             decay_time=0.0,
-            release_time=release_time,
+            release_time=float(release_time),
             rms_max=float(np.max(rms)) if len(rms) > 0 else 0.0,
             rms_mean=float(np.mean(rms)) if len(rms) > 0 else 0.0,
             rms_std=float(np.std(rms)) if len(rms) > 0 else 0.0,
@@ -578,13 +577,13 @@ class PhonemeRecognizer:
     def _skewness(vals: np.ndarray) -> float:
         if len(vals) < 2:
             return 0.0
-        return np.mean((vals - np.mean(vals)) ** 3) / (np.std(vals) ** 3 + 1e-10)
+        return float(np.mean((vals - np.mean(vals)) ** 3) / (np.std(vals) ** 3 + 1e-10))
 
     @staticmethod
     def _kurtosis(vals: np.ndarray) -> float:
         if len(vals) < 2:
             return 0.0
-        return np.mean((vals - np.mean(vals)) ** 4) / (np.std(vals) ** 4 + 1e-10) - 3
+        return float(np.mean((vals - np.mean(vals)) ** 4) / (np.std(vals) ** 4 + 1e-10) - 3)
 
     @staticmethod
     def _compute_mfcc(x: np.ndarray, sr: int, n_mfcc: int = 13) -> List[float]:
@@ -724,6 +723,10 @@ class OtoPredictor:
         X_scaled = self.scaler.transform(X)
         y = np.array([[p.offset, p.preutter, p.overlap, p.constant, p.blank] for p in params_list])
 
+        if self.model is None:
+            self.train(features_list, params_list)
+            return
+
         if XGB_AVAILABLE and isinstance(self.model, xgb.XGBRegressor):
             self.model.fit(X_scaled, y, xgb_model=self.model)
         else:
@@ -850,7 +853,7 @@ class BatchVoiceOptimizer:
         if x.ndim > 1:
             x = np.mean(x, axis=1)
         if sr != target_sr:
-            x = signal.resample(x, int(len(x) * target_sr / sr))
+            x = np.asarray(signal.resample(x, int(len(x) * target_sr / sr)))
             sr = target_sr
 
         recognizer = PhonemeRecognizer()
@@ -870,7 +873,7 @@ class BatchVoiceOptimizer:
             return params
 
         # エンベロープ
-        envelope = np.abs(signal.hilbert(x))
+        envelope = np.abs(np.asarray(signal.hilbert(x)))
         env_smooth = np.convolve(envelope, np.ones(int(sr * 0.005)) / int(sr * 0.005), mode='same')
         env_diff = np.diff(env_smooth, prepend=0)
         env_accel = np.diff(env_diff, prepend=0)
@@ -879,7 +882,7 @@ class BatchVoiceOptimizer:
         search_len = min(int(sr * 0.05), len(env_accel))
         if search_len > 0:
             actual_onset = np.argmax(np.abs(env_accel[:search_len]))
-            params.offset = (actual_onset / sr) * 1000.0
+            params.offset = float((actual_onset / sr) * 1000.0)
 
         # preutter補正（RMSが80%に達する点）
         peak_idx = np.argmax(env_smooth)
