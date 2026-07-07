@@ -335,36 +335,44 @@ def resolve_cnn_model_path(explicit_path: Optional[str] = None) -> Optional[str]
     )
     return None
 
-if TORCH_AVAILABLE:
-    class PhonemeCNN(nn.Module):
-        """メルスペクトログラムから音素を分類する1D CNN"""
+# 【pyright対応】if/elseでクラスを2つ定義すると "obscured by a declaration of the
+# same name" (reportRedeclaration) となり、pyrightが後方の宣言だけを型情報として
+# 採用してしまうため、nn.Module由来のメソッド（load_state_dict/to/eval/__call__等）が
+# 未知の属性として扱われるエラーが多数発生していた。
+# ベースクラスを動的に切り替える単一のクラス定義に統合することでこれを解消する。
+_PhonemeCNNBase = nn.Module if TORCH_AVAILABLE else object
 
-        def __init__(self, n_mels=40, n_classes=50):
-            super().__init__()
-            self.conv1 = nn.Conv1d(1, 64, kernel_size=5, stride=2, padding=2)
-            self.bn1 = nn.BatchNorm1d(64)
-            self.conv2 = nn.Conv1d(64, 128, kernel_size=5, stride=2, padding=2)
-            self.bn2 = nn.BatchNorm1d(128)
-            self.conv3 = nn.Conv1d(128, 256, kernel_size=5, stride=2, padding=2)
-            self.bn3 = nn.BatchNorm1d(256)
-            self.gap = nn.AdaptiveAvgPool1d(1)
-            self.fc1 = nn.Linear(256, 128)
-            self.fc2 = nn.Linear(128, n_classes)
 
-        def forward(self, x):
-            x = F.relu(self.bn1(self.conv1(x)))
-            x = F.relu(self.bn2(self.conv2(x)))
-            x = F.relu(self.bn3(self.conv3(x)))
-            x = self.gap(x).squeeze(-1)
-            x = F.relu(self.fc1(x))
-            return F.softmax(self.fc2(x), dim=1)
-else:
-    # 【バグ修正】torch非搭載環境でもモジュール全体のimportがNameErrorで
-    # 落ちないよう、PhonemeCNNをダミークラスとして定義しておく。
-    # PhonemeRecognizer側は TORCH_AVAILABLE / use_cnn フラグで実際の使用を制御する。
-    class PhonemeCNN:  # type: ignore[no-redef]
-        def __init__(self, *args, **kwargs):
+class PhonemeCNN(_PhonemeCNNBase):  # type: ignore[misc]
+    """メルスペクトログラムから音素を分類する1D CNN
+
+    torch非搭載環境でもモジュール全体のimportがNameErrorで落ちないよう、
+    ベースクラスをobjectにフォールバックする。実際のインスタンス化は
+    TORCH_AVAILABLEがFalseの場合はRuntimeErrorとなる
+    （PhonemeRecognizer側もuse_cnnフラグで使用を制御している）。
+    """
+
+    def __init__(self, n_mels=40, n_classes=50):
+        if not TORCH_AVAILABLE:
             raise RuntimeError("PyTorch is not available; PhonemeCNN cannot be instantiated.")
+        super().__init__()
+        self.conv1 = nn.Conv1d(1, 64, kernel_size=5, stride=2, padding=2)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.conv2 = nn.Conv1d(64, 128, kernel_size=5, stride=2, padding=2)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.conv3 = nn.Conv1d(128, 256, kernel_size=5, stride=2, padding=2)
+        self.bn3 = nn.BatchNorm1d(256)
+        self.gap = nn.AdaptiveAvgPool1d(1)
+        self.fc1 = nn.Linear(256, 128)
+        self.fc2 = nn.Linear(128, n_classes)
+
+    def forward(self, x):
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = self.gap(x).squeeze(-1)
+        x = F.relu(self.fc1(x))
+        return F.softmax(self.fc2(x), dim=1)
 
 
 def _select_torch_device() -> "torch.device":
@@ -747,7 +755,7 @@ class PhonemeRecognizer:
         これにより librosa なしでも意味のあるMFCC相当の特徴量を得られる。
         """
         try:
-            import librosa
+            import librosa  # type: ignore[import-not-found]
             mfcc = librosa.feature.mfcc(y=x, sr=sr, n_mfcc=n_mfcc)
             return list(np.mean(mfcc, axis=1))
         except ImportError:
@@ -867,7 +875,7 @@ class OtoPredictor:
         else:
             # XGBoostがない場合のフォールバック（RandomForest）
             try:
-                from sklearn.ensemble import RandomForestRegressor
+                from sklearn.ensemble import RandomForestRegressor  # type: ignore[import-not-found]
             except ImportError:
                 # 【改善】XGBoost・sklearn.ensembleいずれも無い環境では、
                 # 学習をスキップしてヒューリスティック推定のみで動作させる（例外で落とさない）。
