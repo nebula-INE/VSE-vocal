@@ -1509,6 +1509,10 @@ class MainWindow(
         self.voice_grid = QGridLayout()
         
         self.status_bar = self.statusBar()
+
+        self.toolbar = QToolBar("Main Toolbar")
+        self.addToolBar(self.toolbar)
+
         
         # --- 2. 属性の初期化（AttributeError 対策） ---
         self._init_attributes(engine, ai, config)
@@ -1532,6 +1536,18 @@ class MainWindow(
         # setup_toolbar (init_ui内) の後である必要がある。
         self.setup_performance_toggle()
 
+        # ---- キャンセルボタン ----
+        self.cancel_render_btn = QPushButton("✖ キャンセル")
+        self.cancel_render_btn.setObjectName("DangerButton")
+        self.cancel_render_btn.setVisible(False)   # ← 初期は非表示
+        self.cancel_render_btn.setEnabled(False)
+        self.cancel_render_btn.clicked.connect(self.cancel_current_render)
+        self.toolbar.addWidget(self.cancel_render_btn)
+
+        # ETAラベル（ステータスバー）
+        self.render_eta_label = QLabel("")
+        self.statusBar().addPermanentWidget(self.render_eta_label)
+
         # リアルタイムモニタリングの有効化。
         self.setup_realtime_monitoring()
 
@@ -1544,7 +1560,7 @@ class MainWindow(
         # self.ai_session が存在せず AttributeError になっていた。
         self.setup_aural_ai()
 
-        self.setWindowTitle("VO-SE Pro")
+        self.setWindowTitle("VO-SE vocal")
         self.resize(1200, 800)
 
     def _init_attributes(self, engine: Any, ai: Any, config: Any):
