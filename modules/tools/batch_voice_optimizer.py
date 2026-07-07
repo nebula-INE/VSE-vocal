@@ -978,7 +978,13 @@ def _init_worker(model_path: Optional[str]) -> None:
 class BatchVoiceOptimizer:
     """oto.ini 一括生成エンジン（完全版）"""
 
-    def __init__(self, target_sr: int = 16000, cache_dir: str = "cache/oto_cache"):
+    def __init__(
+        self,
+        target_sr: int = 16000,
+        cache_dir: str = "cache/oto_cache",
+        max_workers: Optional[int] = None,
+        use_multiprocessing: bool = True,
+    ):
         self.target_sr = target_sr
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
@@ -987,6 +993,15 @@ class BatchVoiceOptimizer:
         self.recognizer = PhonemeRecognizer()
         self.training_features: List[AcousticFeatures] = []
         self.training_labels: List[OtoParams] = []
+
+        # 【改善】プロセスごとにCNNモデル等がメモリ上に複製されるため、
+        # メモリの少ない環境ではワーカー数を絞れるようにする。
+        # 未指定時は従来通りCPUコア数を使用。
+        self.max_workers = max_workers if max_workers is not None else multiprocessing.cpu_count()
+        # 【改善】シリアルモード。マルチプロセスを一切使わず、
+        # メインプロセス内で1ファイルずつ処理する（CNNモデルの複製が発生しない）。
+        # メモリが極端に少ない環境や、デバッグ時のスタックトレース確認に有用。
+        self.use_multiprocessing = use_multiprocessing
 
     def optimize_voice_bank(self, voice_dir: str, force_redo: bool = False) -> Dict[str, OtoParams]:
         wav_files = self._collect_wavs(voice_dir)
@@ -1011,19 +1026,35 @@ class BatchVoiceOptimizer:
         results: Dict[str, OtoParams] = {}
         model_path_for_workers = self.model_path if os.path.exists(self.model_path) else None
 
-        with ProcessPoolExecutor(
-            max_workers=multiprocessing.cpu_count(),
-            initializer=_init_worker,
-            initargs=(model_path_for_workers,),
-        ) as executor:
-            future_to_path = {
-                executor.submit(self._analyze_single_wav, path, self.target_sr): path
-                for path in tasks
-            }
-            for future in as_completed(future_to_path):
-                path = future_to_path[future]
+        if self.use_multiprocessing:
+            with ProcessPoolExecutor(
+                max_workers=self.max_workers,
+                initializer=_init_worker,
+                initargs=(model_path_for_workers,),
+            ) as executor:
+                future_to_path = {
+                    executor.submit(self._analyze_single_wav, path, self.target_sr): path
+                    for path in tasks
+                }
+                for future in as_completed(future_to_path):
+                    path = future_to_path[future]
+                    try:
+                        params, features = future.result(timeout=90)
+                        results[path] = params
+                        self._save_cache(path, params)
+                        if params.confidence > 0.5:
+                            self.training_features.append(features)
+                            self.training_labels.append(params)
+                    except Exception as e:
+                        print(f"[ERROR] {path}: {e}")
+        else:
+            # 【シリアルモード】マルチプロセスを使わずメインプロセス内で順次処理。
+            # CNNモデルの複製が発生せず、self.recognizer/self.predictorを使い回すため
+            # メモリ効率が良い（速度はマルチプロセスより劣る）。
+            print("[BatchOptimizer] シリアルモードで実行中（マルチプロセス無効）...")
+            for path in tasks:
                 try:
-                    params, features = future.result(timeout=90)
+                    params, features = self._analyze_wav_with(path, self.target_sr, self.recognizer, self.predictor)
                     results[path] = params
                     self._save_cache(path, params)
                     if params.confidence > 0.5:
@@ -1046,8 +1077,13 @@ class BatchVoiceOptimizer:
         return results
 
     @staticmethod
-    def _analyze_single_wav(wav_path: str, target_sr: int) -> Tuple[OtoParams, AcousticFeatures]:
-        """1WAV解析（子プロセス用）。initializerでロード済みのグローバルモデルを再利用する。"""
+    def _analyze_wav_with(
+        wav_path: str,
+        target_sr: int,
+        recognizer: "PhonemeRecognizer",
+        predictor: "OtoPredictor",
+    ) -> Tuple[OtoParams, AcousticFeatures]:
+        """WAV解析の共通ロジック。渡されたrecognizer/predictorインスタンスを再利用する。"""
         data, sr = sf.read(wav_path, always_2d=False)
         x = np.asarray(data, dtype=np.float64)
         if x.ndim > 1:
@@ -1056,18 +1092,22 @@ class BatchVoiceOptimizer:
             x = np.asarray(signal.resample(x, int(len(x) * target_sr / sr)))
             sr = target_sr
 
-        # 【改善】initializer未使用（例: 直接呼び出しやテスト時）でも動作するよう
-        # グローバルが未設定の場合はその場でインスタンス化するフォールバックを残す。
-        global _worker_recognizer, _worker_predictor
-        recognizer = _worker_recognizer if _worker_recognizer is not None else PhonemeRecognizer()
-        predictor = _worker_predictor if _worker_predictor is not None else OtoPredictor(None)
-
         features = recognizer.recognize(x, sr, wav_path)
         params = predictor.predict(features)
 
         # 信号処理による微調整
         params = BatchVoiceOptimizer._refine_params(x, sr, params, features)
         return params, features
+
+    @staticmethod
+    def _analyze_single_wav(wav_path: str, target_sr: int) -> Tuple[OtoParams, AcousticFeatures]:
+        """1WAV解析（子プロセス用）。initializerでロード済みのグローバルモデルを再利用する。"""
+        # 【改善】initializer未使用（例: 直接呼び出しやテスト時）でも動作するよう
+        # グローバルが未設定の場合はその場でインスタンス化するフォールバックを残す。
+        global _worker_recognizer, _worker_predictor
+        recognizer = _worker_recognizer if _worker_recognizer is not None else PhonemeRecognizer()
+        predictor = _worker_predictor if _worker_predictor is not None else OtoPredictor(None)
+        return BatchVoiceOptimizer._analyze_wav_with(wav_path, target_sr, recognizer, predictor)
 
     @staticmethod
     def _refine_params(x: np.ndarray, sr: int, params: OtoParams, features: AcousticFeatures) -> OtoParams:
@@ -1183,11 +1223,21 @@ class BatchVoiceOptimizer:
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("Usage: python batch_voice_optimizer.py <voice_dir> [--force]")
+        print(
+            "Usage: python batch_voice_optimizer.py <voice_dir> [--force] "
+            "[--serial] [--max-workers N]"
+        )
         sys.exit(1)
     voice_dir = sys.argv[1]
     force = "--force" in sys.argv
-    optimizer = BatchVoiceOptimizer()
+    # 【改善】メモリの少ない環境向けにシリアルモード/ワーカー数制限をCLIから指定可能に
+    use_mp = "--serial" not in sys.argv
+    max_workers = None
+    if "--max-workers" in sys.argv:
+        idx = sys.argv.index("--max-workers")
+        if idx + 1 < len(sys.argv):
+            max_workers = int(sys.argv[idx + 1])
+    optimizer = BatchVoiceOptimizer(max_workers=max_workers, use_multiprocessing=use_mp)
     results = optimizer.optimize_voice_bank(voice_dir, force_redo=force)
     if results:
         BatchVoiceOptimizer.export_oto_ini(voice_dir, results)
