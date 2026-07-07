@@ -5,7 +5,7 @@ import platform
 import numpy as np
 import tempfile
 import shutil
-from typing import List, Dict, Any, Optional, Callable, Tuple
+from typing import List, Dict, Any, Callable
 try:
     import sounddevice as sd
 except Exception:
