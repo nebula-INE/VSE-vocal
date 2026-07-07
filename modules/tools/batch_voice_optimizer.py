@@ -27,7 +27,37 @@ from scipy import signal
 from scipy.fft import rfft, rfftfreq
 from scipy.signal import find_peaks, lfilter
 from scipy.linalg import solve_toeplitz
-from sklearn.preprocessing import StandardScaler  # type: ignore[import-not-found]
+try:
+    from sklearn.preprocessing import StandardScaler  # type: ignore[import-not-found]
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+
+    class StandardScaler:  # type: ignore[no-redef]
+        """
+        【堅牢化】scikit-learn非搭載環境向けの最小限フォールバック実装。
+        平均・標準偏差ベースの正規化のみ提供し、外部依存を持たない。
+        """
+        def __init__(self):
+            self.mean_: Optional[np.ndarray] = None
+            self.scale_: Optional[np.ndarray] = None
+
+        def fit(self, X: np.ndarray):
+            X = np.asarray(X, dtype=np.float64)
+            self.mean_ = np.mean(X, axis=0)
+            std = np.std(X, axis=0)
+            self.scale_ = np.where(std < 1e-8, 1.0, std)
+            return self
+
+        def transform(self, X: np.ndarray) -> np.ndarray:
+            X = np.asarray(X, dtype=np.float64)
+            if self.mean_ is None or self.scale_ is None:
+                return X
+            return (X - self.mean_) / self.scale_
+
+        def fit_transform(self, X: np.ndarray) -> np.ndarray:
+            return self.fit(X).transform(X)
+
 import logging
 logger = logging.getLogger("VO-SE-vocal")
 
@@ -261,42 +291,68 @@ DEFAULT_CNN_MODEL_PATH = os.path.join(_MODULE_DIR, "models", "phoneme_cnn_pretra
 def resolve_cnn_model_path(explicit_path: Optional[str] = None) -> Optional[str]:
     """
     使用するCNNモデルパスを決定する。
-    優先順位: 1) 明示的に指定されたパス  2) 同梱の汎用モデル  3) なし（ヒューリスティックにフォールバック）
+    優先順位: 1) 明示的に指定されたパス  2) 同梱の汎用モデル
+              3) （設定されていれば）初回ダウンロード  4) なし（ヒューリスティックにフォールバック）
     """
     if explicit_path and os.path.exists(explicit_path):
         return explicit_path
     if os.path.exists(DEFAULT_CNN_MODEL_PATH):
         return DEFAULT_CNN_MODEL_PATH
+
+    # 【改善】初回起動時の自動取得（オプション）。
+    # 環境変数 VOSE_CNN_MODEL_URL が設定されている場合のみ、同梱モデルの配置先へダウンロードを試みる。
+    # ネットワークが使えない/未設定の環境では何もせずヒューリスティックにフォールバックするだけなので安全。
+    download_url = os.environ.get("VOSE_CNN_MODEL_URL")
+    if download_url:
+        try:
+            import urllib.request
+            os.makedirs(os.path.dirname(DEFAULT_CNN_MODEL_PATH), exist_ok=True)
+            logger.info(f"同梱モデルが未配置のため {download_url} から初回ダウンロードします...")
+            urllib.request.urlretrieve(download_url, DEFAULT_CNN_MODEL_PATH)
+            if os.path.exists(DEFAULT_CNN_MODEL_PATH):
+                return DEFAULT_CNN_MODEL_PATH
+        except Exception as e:
+            logger.warning(f"CNNモデルの自動ダウンロードに失敗しました: {e}")
+
     logger.info(
         "同梱の汎用CNNモデルが見つかりません (%s)。"
         "ヒューリスティック/XGBoostベースの推定にフォールバックします。"
-        "models/phoneme_cnn_pretrained.pt を配置すると初回から精度が向上します。",
+        "models/phoneme_cnn_pretrained.pt を配置するか、"
+        "環境変数 VOSE_CNN_MODEL_URL を設定すると初回から精度が向上します。",
         DEFAULT_CNN_MODEL_PATH,
     )
     return None
 
-class PhonemeCNN(nn.Module):
-    """メルスペクトログラムから音素を分類する1D CNN"""
+if TORCH_AVAILABLE:
+    class PhonemeCNN(nn.Module):
+        """メルスペクトログラムから音素を分類する1D CNN"""
 
-    def __init__(self, n_mels=40, n_classes=50):
-        super().__init__()
-        self.conv1 = nn.Conv1d(1, 64, kernel_size=5, stride=2, padding=2)
-        self.bn1 = nn.BatchNorm1d(64)
-        self.conv2 = nn.Conv1d(64, 128, kernel_size=5, stride=2, padding=2)
-        self.bn2 = nn.BatchNorm1d(128)
-        self.conv3 = nn.Conv1d(128, 256, kernel_size=5, stride=2, padding=2)
-        self.bn3 = nn.BatchNorm1d(256)
-        self.gap = nn.AdaptiveAvgPool1d(1)
-        self.fc1 = nn.Linear(256, 128)
-        self.fc2 = nn.Linear(128, n_classes)
+        def __init__(self, n_mels=40, n_classes=50):
+            super().__init__()
+            self.conv1 = nn.Conv1d(1, 64, kernel_size=5, stride=2, padding=2)
+            self.bn1 = nn.BatchNorm1d(64)
+            self.conv2 = nn.Conv1d(64, 128, kernel_size=5, stride=2, padding=2)
+            self.bn2 = nn.BatchNorm1d(128)
+            self.conv3 = nn.Conv1d(128, 256, kernel_size=5, stride=2, padding=2)
+            self.bn3 = nn.BatchNorm1d(256)
+            self.gap = nn.AdaptiveAvgPool1d(1)
+            self.fc1 = nn.Linear(256, 128)
+            self.fc2 = nn.Linear(128, n_classes)
 
-    def forward(self, x):
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
-        x = self.gap(x).squeeze(-1)
-        x = F.relu(self.fc1(x))
-        return F.softmax(self.fc2(x), dim=1)
+        def forward(self, x):
+            x = F.relu(self.bn1(self.conv1(x)))
+            x = F.relu(self.bn2(self.conv2(x)))
+            x = F.relu(self.bn3(self.conv3(x)))
+            x = self.gap(x).squeeze(-1)
+            x = F.relu(self.fc1(x))
+            return F.softmax(self.fc2(x), dim=1)
+else:
+    # 【バグ修正】torch非搭載環境でもモジュール全体のimportがNameErrorで
+    # 落ちないよう、PhonemeCNNをダミークラスとして定義しておく。
+    # PhonemeRecognizer側は TORCH_AVAILABLE / use_cnn フラグで実際の使用を制御する。
+    class PhonemeCNN:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("PyTorch is not available; PhonemeCNN cannot be instantiated.")
 
 
 def _select_torch_device() -> "torch.device":
@@ -378,11 +434,18 @@ class PhonemeRecognizer:
         self.device = _select_torch_device() if TORCH_AVAILABLE else None
         if self.use_cnn:
             self.cnn_model = PhonemeCNN()
-            self.cnn_model.load_state_dict(torch.load(resolved_path, map_location='cpu'))
-            # 【GPU/NPU対応】CUDA(NVIDIA) / MPS(Apple Silicon) を自動オフロード
-            self.cnn_model.to(self.device)
-            self.cnn_model.eval()
-            logger.info(f"PhonemeCNN loaded on device: {self.device}")
+            try:
+                self.cnn_model.load_state_dict(torch.load(resolved_path, map_location='cpu'))
+                # 【GPU/NPU対応】CUDA(NVIDIA) / MPS(Apple Silicon) を自動オフロード
+                self.cnn_model.to(self.device)
+                self.cnn_model.eval()
+                logger.info(f"PhonemeCNN loaded on device: {self.device}")
+            except Exception as e:
+                # 【改善】ファイルは存在するが破損/形式不一致等で読み込み失敗した場合、
+                # use_cnn を確実にFalseへ戻し、cnn_modelもNoneにしてヒューリスティックへ安全にフォールバック。
+                logger.warning(f"Failed to load CNN model at {resolved_path}: {e}")
+                self.use_cnn = False
+                self.cnn_model = None
 
     def recognize(self, x: np.ndarray, sr: int, filename: str = "") -> AcousticFeatures:
         """音声波形から音響特徴量と音素情報を抽出"""
@@ -664,15 +727,44 @@ class PhonemeRecognizer:
             return 0.0
         return float(np.mean((vals - np.mean(vals)) ** 4) / (np.std(vals) ** 4 + 1e-10) - 3)
 
-    @staticmethod
-    def _compute_mfcc(x: np.ndarray, sr: int, n_mfcc: int = 13) -> List[float]:
-        """DCTベースの簡易MFCC（librosa非依存）"""
+    def _compute_mfcc(self, x: np.ndarray, sr: int, n_mfcc: int = 13) -> List[float]:
+        """
+        MFCC計算。librosaがあれば優先使用し、無い場合は
+        本クラス既存の独自メルフィルタバンク（_mel_filterbank）+ DCT-II で代替する。
+        【改善】従来は librosa 非搭載時に [0.0]*13 を返し特徴量が完全に無効化されていたが、
+        これにより librosa なしでも意味のあるMFCC相当の特徴量を得られる。
+        """
         try:
             import librosa
             mfcc = librosa.feature.mfcc(y=x, sr=sr, n_mfcc=n_mfcc)
             return list(np.mean(mfcc, axis=1))
         except ImportError:
-            # 完全に自力で計算するのは複雑なので、フォールバックとしてスペクトル重心などを返す
+            return self._compute_mfcc_fallback(x, sr, n_mfcc)
+
+    def _compute_mfcc_fallback(self, x: np.ndarray, sr: int, n_mfcc: int = 13) -> List[float]:
+        """librosa非依存のMFCC代替実装（メルフィルタバンク + DCT-II）"""
+        if len(x) < 32:
+            return [0.0] * n_mfcc
+        n_fft = 512
+        hop = 160
+        n_mels = max(n_mfcc + 2, 20)
+        try:
+            _, _, spec_complex = signal.stft(x, fs=sr, nperseg=n_fft, noverlap=max(0, n_fft - hop), window='hann')
+            spec = np.abs(spec_complex)
+            mel_basis = self._mel_filterbank(sr, n_fft, n_mels)
+            mel_spec = mel_basis @ spec
+            log_mel = np.log(mel_spec + 1e-10)
+            log_mel_mean = np.mean(log_mel, axis=1)  # (n_mels,)
+
+            # DCT-II（scipy非依存の直接実装、要素数が少ないため計算コストは無視できる）
+            N = n_mels
+            k = np.arange(n_mfcc)
+            n = np.arange(N)
+            dct_basis = np.cos(np.pi / N * (n[None, :] + 0.5) * k[:, None])
+            mfcc_vec = dct_basis @ log_mel_mean
+            return list(mfcc_vec.astype(float))
+        except Exception as e:
+            logger.warning(f"MFCC fallback computation failed: {e}")
             return [0.0] * n_mfcc
 
 
@@ -762,7 +854,17 @@ class OtoPredictor:
             self.model.fit(X_scaled, y)
         else:
             # XGBoostがない場合のフォールバック（RandomForest）
-            from sklearn.ensemble import RandomForestRegressor
+            try:
+                from sklearn.ensemble import RandomForestRegressor
+            except ImportError:
+                # 【改善】XGBoost・sklearn.ensembleいずれも無い環境では、
+                # 学習をスキップしてヒューリスティック推定のみで動作させる（例外で落とさない）。
+                logger.warning(
+                    "XGBoostもscikit-learn(RandomForestRegressor)も利用できないため、"
+                    "機械学習モデルの学習をスキップし、ヒューリスティック推定にフォールバックします。"
+                )
+                self.is_trained = False
+                return
             self.model = RandomForestRegressor(n_estimators=100, max_depth=12, random_state=42)
             self.model.fit(X_scaled, y)
 
@@ -858,6 +960,21 @@ class OtoPredictor:
 # 5. メインバッチオプティマイザ
 # ═══════════════════════════════════════════════════════════════════════
 
+# ─── マルチプロセスワーカー用グローバルキャッシュ ──────────────────────
+# 【改善】ProcessPoolExecutor の initializer で子プロセスごとに一度だけ
+# PhonemeRecognizer / OtoPredictor をロードし、タスクごとの再インスタンス化
+# （モデル読み込みI/O・CNN初期化等）のオーバーヘッドを排除する。
+_worker_recognizer: Optional["PhonemeRecognizer"] = None
+_worker_predictor: Optional["OtoPredictor"] = None
+
+
+def _init_worker(model_path: Optional[str]) -> None:
+    """ProcessPoolExecutor の initializer。子プロセス起動時に一度だけ呼ばれる。"""
+    global _worker_recognizer, _worker_predictor
+    _worker_recognizer = PhonemeRecognizer()
+    _worker_predictor = OtoPredictor(model_path)
+
+
 class BatchVoiceOptimizer:
     """oto.ini 一括生成エンジン（完全版）"""
 
@@ -894,9 +1011,13 @@ class BatchVoiceOptimizer:
         results: Dict[str, OtoParams] = {}
         model_path_for_workers = self.model_path if os.path.exists(self.model_path) else None
 
-        with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+        with ProcessPoolExecutor(
+            max_workers=multiprocessing.cpu_count(),
+            initializer=_init_worker,
+            initargs=(model_path_for_workers,),
+        ) as executor:
             future_to_path = {
-                executor.submit(self._analyze_single_wav, path, self.target_sr, model_path_for_workers): path
+                executor.submit(self._analyze_single_wav, path, self.target_sr): path
                 for path in tasks
             }
             for future in as_completed(future_to_path):
@@ -925,8 +1046,8 @@ class BatchVoiceOptimizer:
         return results
 
     @staticmethod
-    def _analyze_single_wav(wav_path: str, target_sr: int, model_path: Optional[str]) -> Tuple[OtoParams, AcousticFeatures]:
-        """1WAV解析（子プロセス用）"""
+    def _analyze_single_wav(wav_path: str, target_sr: int) -> Tuple[OtoParams, AcousticFeatures]:
+        """1WAV解析（子プロセス用）。initializerでロード済みのグローバルモデルを再利用する。"""
         data, sr = sf.read(wav_path, always_2d=False)
         x = np.asarray(data, dtype=np.float64)
         if x.ndim > 1:
@@ -935,10 +1056,13 @@ class BatchVoiceOptimizer:
             x = np.asarray(signal.resample(x, int(len(x) * target_sr / sr)))
             sr = target_sr
 
-        recognizer = PhonemeRecognizer()
-        features = recognizer.recognize(x, sr, wav_path)
+        # 【改善】initializer未使用（例: 直接呼び出しやテスト時）でも動作するよう
+        # グローバルが未設定の場合はその場でインスタンス化するフォールバックを残す。
+        global _worker_recognizer, _worker_predictor
+        recognizer = _worker_recognizer if _worker_recognizer is not None else PhonemeRecognizer()
+        predictor = _worker_predictor if _worker_predictor is not None else OtoPredictor(None)
 
-        predictor = OtoPredictor(model_path)
+        features = recognizer.recognize(x, sr, wav_path)
         params = predictor.predict(features)
 
         # 信号処理による微調整
