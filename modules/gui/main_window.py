@@ -5606,8 +5606,8 @@ class MainWindow(
         """
         タイムライン上の全ノートをスキャンし、非同期でレンダリングを開始する。
         """
-        from modules.data.licensing import LicenseManager # ライセンス管理をロード
-      
+        from modules.data.licensing import LicenseManager
+
         # 1. 保存先の決定
         output_wav = os.path.join(os.getcwd(), "output", "render_result.wav")
         os.makedirs(os.path.dirname(output_wav), exist_ok=True)
@@ -5622,63 +5622,56 @@ class MainWindow(
             self.statusBar().showMessage("エラー: エンジンがロードされていません。")
             return
 
-        # 3. 準備（ここは一瞬なのでメインスレッドでOK）
+        # 3. 準備
         try:
             is_pro = LicenseManager.is_pro()
             self.statusBar().showMessage("レンダリング準備中...")
-            note_count = len(raw_notes)
-            # NoteEvent型が定義されている前提
-            NotesArrayType = NoteEvent * note_count 
-            c_notes = NotesArrayType()
-            
-
-
-            # --- 【ここから非同期化の修正】 ---
-            status_text = "レンダリング中 (Studio Master)..." if is_pro else "レンダリング中..."
-            self.statusBar().showMessage(status_text)
-
-            note_count = len(raw_notes)
-            NotesArrayType = NoteEvent * note_count 
-            c_notes = NotesArrayType()
-
-            for i, note_data in enumerate(raw_notes):
-                c_notes[i] = prepare_c_note_event(note_data)
 
             # --- UI状態変更（レンダリング開始） ---
-            # ネイティブ側に進捗コールバックが無いため、プログレスバーは
-            # 不確定モード（ぐるぐる回るモード）で表示する。
             self._render_cancelled = False
             if hasattr(self, "progress_bar"):
-                self.progress_bar.setRange(0, 0)
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(0)
                 self.progress_bar.setVisible(True)
             self.render_eta_label.setText("ETA: 計算中...")
             self.render_btn.setEnabled(False)
 
-            # ★ キャンセルボタンを表示・有効化
+            # キャンセルボタンを表示・有効化
             self.cancel_render_btn.setVisible(True)
             self.cancel_render_btn.setEnabled(True)
 
             # ワーカーの作成
             worker = SynthesisWorker(
-                self.vose_core, 
-                c_notes, 
-                note_count, 
+                self.vose_core,
+                raw_notes,
                 output_wav,
-                is_pro=is_pro #有料版かどうか
+                is_pro=is_pro
             )
             self.current_worker = worker
 
-            # シグナルの接続
+            # シグナルの接続（progress を追加）
             worker.signals.finished.connect(self.on_render_success)
             worker.signals.error.connect(self.on_render_failed)
+            worker.signals.progress.connect(self.on_render_progress)
 
-            # スレッドプールで実行開始（これでGUIが固まらなくなる）
+            # スレッドプールで実行開始
             QThreadPool.globalInstance().start(worker)
 
         except Exception as e:
             self.on_render_failed(str(e))
 
-    # --- コールバック用メソッド ---
+    @Slot(int, float)
+    def on_render_progress(self, percent: int, eta_sec: float):
+        """レンダリング進捗の更新（プログレスバーとETAラベル）"""
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.setValue(percent)
+        if eta_sec > 0:
+            mins = int(eta_sec // 60)
+            secs = int(eta_sec % 60)
+            self.render_eta_label.setText(f"ETA: {mins:02d}:{secs:02d}")
+        else:
+            self.render_eta_label.setText("ETA: 計算中...")
+
     def on_render_success(self, output_wav):
         """レンダリング成功時の処理"""
         if hasattr(self, "progress_bar"):
@@ -5686,22 +5679,19 @@ class MainWindow(
         self.render_btn.setEnabled(True)
         self.render_eta_label.setText("完了")
 
-        # ★ キャンセルボタンを非表示・無効化
         self.cancel_render_btn.setVisible(False)
         self.cancel_render_btn.setEnabled(False)
         self.current_worker = None
 
         self.statusBar().showMessage(f"レンダリング完了: {output_wav}")
         self.play_rendered_audio(output_wav)
-        
 
     def on_render_failed(self, error_msg):
-        """レンダリング失敗時の処理"""
+        """レンダリング失敗時の処理（キャンセルも含む）"""
         if hasattr(self, "progress_bar"):
             self.progress_bar.setVisible(False)
         self.render_btn.setEnabled(True)
 
-        # ★ キャンセルボタンを非表示・無効化
         self.cancel_render_btn.setVisible(False)
         self.cancel_render_btn.setEnabled(False)
         self.current_worker = None
@@ -5724,12 +5714,11 @@ class MainWindow(
         if self.current_worker:
             self._render_cancelled = True
             self.current_worker.cancel()
-            # ★ ボタンを即座に非表示・無効化（二重クリック防止）
             self.cancel_render_btn.setVisible(False)
             self.cancel_render_btn.setEnabled(False)
             self.render_eta_label.setText("キャンセル中...")
             self.statusBar().showMessage(
-                "キャンセル要求を送信しました（処理中の演算が完了するまで少し待ちます）..."
+                "キャンセル要求を送信しました（現在のチャンク完了後に停止します）。"
             )
 
     def play_rendered_audio(self, wav_path: str) -> None:
