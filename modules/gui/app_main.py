@@ -127,38 +127,52 @@ def main():
     try:
         import importlib
         if pyi_splash:
-            pyi_splash.update_text("音声エンジンをロード中...")
-        
-        VO_SE_Engine = importlib.import_module("modules.audio.vo_se_engine").VO_SE_Engine  # type: ignore[attr-defined]
-        AIManager = importlib.import_module("modules.ai.ai_manager").AIManager  # type: ignore[attr-defined]
-        AudioOutput = importlib.import_module("modules.audio.audio_output").AudioOutput  # type: ignore[attr-defined]
-
-        # 低遅延オーディオ出力の初期化
-        audio_device = AudioOutput(sample_rate=44100, block_size=256)
-        
-        # C言語エンジンのロード
-        engine = VO_SE_Engine() 
-
-        if pyi_splash:
-            pyi_splash.update_text("AI推論モデルを最適化中...")
-
-        # AIマネージャーの初期化
-        ai = AIManager()
-        ai.init_model()
-
-        # 4. メインウィンドウの作成と依存注入(Dependency Injection)
-        if pyi_splash:
             pyi_splash.update_text("UIを構築中...")
-            
-        window = MainWindow(engine=engine, ai=ai)
+
+        # 音声出力は軽量なので先に作っておく
+        AudioOutput = importlib.import_module("modules.audio.audio_output").AudioOutput  # type: ignore[attr-defined]
+        audio_device = AudioOutput(sample_rate=44100, block_size=256)
+
+        # ウィンドウを先に作成（エンジンは後でセット）
+        window = MainWindow(engine=None, ai=None)
         window.audio_output = audio_device
 
-        # --- 5. セットアップ完了、表示 ---
         if pyi_splash:
             pyi_splash.close()
 
         window.show()
-        
+
+        # --- 【遅延実行】重いエンジンとAIを非同期でロード ---
+        def load_heavy_engines():
+            try:
+                VO_SE_Engine = importlib.import_module("modules.audio.vo_se_engine").VO_SE_Engine  # type: ignore[attr-defined]
+                AIManager = importlib.import_module("modules.ai.ai_manager").AIManager  # type: ignore[attr-defined]
+
+                window.statusBar().showMessage("音声エンジンをロード中...")
+                engine = VO_SE_Engine()
+                window.vo_se_engine = engine
+
+                window.statusBar().showMessage("AI推論モデルを最適化中...")
+                ai = AIManager()
+                ai.init_model()
+                window.ai_manager = ai
+
+                # エンジンがロードされたらステータス更新
+                if hasattr(window, 'statusBar'):
+                    window.statusBar().showMessage("VO-SE Pro エンジン準備完了", 3000)
+
+                # もし初期ノートがあればキャッシュ準備
+                if hasattr(window, 'on_timeline_updated'):
+                    window.on_timeline_updated()
+
+            except Exception as e:
+                print(f"エンジン遅延ロードエラー: {e}")
+                if hasattr(window, 'statusBar'):
+                    window.statusBar().showMessage(f"エンジンロードエラー: {e}", 5000)
+
+        # メインウィンドウ表示後 200ms 待ってからロード開始
+        QTimer.singleShot(200, load_heavy_engines)
+
     except Exception as e:
         logging.critical(f"アプリケーションの起動に失敗しました: {e}")
         if pyi_splash:
@@ -166,7 +180,7 @@ def main():
         return
 
     sys.exit(app.exec())
-
+    
 # Windowsのタスクバーアイコン個別認識用（PyInstallerで必須）
 if platform_system := os.name == 'nt':
     try:
