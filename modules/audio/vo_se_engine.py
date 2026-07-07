@@ -5,7 +5,7 @@ import platform
 import numpy as np
 import tempfile
 import shutil
-from typing import List, Dict, Any, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
 try:
     import sounddevice as sd
 except Exception:
@@ -240,6 +240,11 @@ class VO_SE_Engine:
         if not self.lib:
             raise RuntimeError("Engine Core library missing!")
 
+        # soundfile が利用可能かチェック（安全ガード）
+        if sf is None:
+            print("[VO_SE_Engine] soundfile not available, cannot write WAV.")
+            return None
+
         total = len(notes)
         if total == 0:
             return None
@@ -272,15 +277,17 @@ class VO_SE_Engine:
                         wav_path = list(self.oto_map.values())[0] if self.oto_map else ""
 
                     res = 128
-                    p_curve = self._get_sampled_curve(parameters["Pitch"], note, res, is_pitch=True).astype(np.float64)
-                    g_curve = self._get_sampled_curve(parameters["Gender"], note, res).astype(np.float64)
-                    t_curve = self._get_sampled_curve(parameters["Tension"], note, res).astype(np.float64)
-                    b_curve = self._get_sampled_curve(parameters["Breath"], note, res).astype(np.float64)
+                    p_curve = self._get_sampled_curve(parameters.get("Pitch", []), note, res, is_pitch=True).astype(np.float64)
+                    g_curve = self._get_sampled_curve(parameters.get("Gender", []), note, res).astype(np.float64)
+                    t_curve = self._get_sampled_curve(parameters.get("Tension", []), note, res).astype(np.float64)
+                    b_curve = self._get_sampled_curve(parameters.get("Breath", []), note, res).astype(np.float64)
                     vibrato_depth_curve = np.zeros(res, dtype=np.float64)
                     vibrato_rate_curve = np.zeros(res, dtype=np.float64)
 
-                    self._temp_refs.extend([p_curve, g_curve, t_curve, b_curve,
-                                            vibrato_depth_curve, vibrato_rate_curve])
+                    self._temp_refs.extend([
+                        p_curve, g_curve, t_curve, b_curve,
+                        vibrato_depth_curve, vibrato_rate_curve
+                    ])
 
                     c_notes_array[i].wav_path = wav_path.encode('utf-8')
                     c_notes_array[i].pitch_curve = p_curve.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
