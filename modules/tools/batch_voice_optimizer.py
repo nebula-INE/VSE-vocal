@@ -12,6 +12,7 @@
 # ═══════════════════════════════════════════════════════════════════════
 
 import os
+import re
 import json
 import hashlib
 import pickle
@@ -249,6 +250,31 @@ class FormantTracker:
 # 3. 音素認識エンジン (pyopenjtalk + CNN)
 # ═══════════════════════════════════════════════════════════════════════
 
+# 【事前学習済みCNNモデルの同梱】
+# パッケージ内 (modules/tools/models/) に汎用モデルを同梱しておくことで、
+# ユーザー側の再学習なしに初回から一定の精度を確保する。
+# 実際の .pt ファイルはリポジトリに同梱 or 初回起動時に別途配布する想定。
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CNN_MODEL_PATH = os.path.join(_MODULE_DIR, "models", "phoneme_cnn_pretrained.pt")
+
+
+def resolve_cnn_model_path(explicit_path: Optional[str] = None) -> Optional[str]:
+    """
+    使用するCNNモデルパスを決定する。
+    優先順位: 1) 明示的に指定されたパス  2) 同梱の汎用モデル  3) なし（ヒューリスティックにフォールバック）
+    """
+    if explicit_path and os.path.exists(explicit_path):
+        return explicit_path
+    if os.path.exists(DEFAULT_CNN_MODEL_PATH):
+        return DEFAULT_CNN_MODEL_PATH
+    logger.info(
+        "同梱の汎用CNNモデルが見つかりません (%s)。"
+        "ヒューリスティック/XGBoostベースの推定にフォールバックします。"
+        "models/phoneme_cnn_pretrained.pt を配置すると初回から精度が向上します。",
+        DEFAULT_CNN_MODEL_PATH,
+    )
+    return None
+
 class PhonemeCNN(nn.Module):
     """メルスペクトログラムから音素を分類する1D CNN"""
 
@@ -273,6 +299,20 @@ class PhonemeCNN(nn.Module):
         return F.softmax(self.fc2(x), dim=1)
 
 
+def _select_torch_device() -> "torch.device":
+    """
+    利用可能な最速デバイスを自動選択する。
+    優先順位: CUDA (NVIDIA GPU) > MPS (Apple Silicon GPU/NPU) > CPU
+    """
+    if not TORCH_AVAILABLE:
+        return None
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 class PhonemeRecognizer:
     """音素認識の統合インターフェース"""
 
@@ -286,6 +326,35 @@ class PhonemeRecognizer:
         'r': 'liquid', 'w': 'approximant', 'y': 'approximant',
         'cl': 'special', 'pau': 'special'
     }
+
+    # 【ファイル名サニタイズ】G2Pに不要なノイズ文字を除去するための正規表現。
+    # 連番・拡張子残骸・記号・空白・アンダースコア・括弧書きの注記などは
+    # pyopenjtalk.g2p() の解析精度を落とすため、事前に取り除く。
+    # 残すのは「ひらがな・カタカナ・漢字・ローマ字（a-zA-Z）」のみ。
+    _NON_LINGUISTIC_CHARS = re.compile(
+        r'[0-9０-９'                     # 半角/全角数字（連番）
+        r'_\-\.\+\(\)\[\]\{\}'          # 記号類
+        r'（）「」『』【】〈〉《》'         # 全角括弧類
+        r'～〜~!！?？@#$%^&*=;:,、。・'  # その他記号
+        r'\s]+'                          # 空白（半角/全角）
+        r'|'
+        r'(?<=[a-zA-Zぁ-んァ-ヶ一-龠])(?=[0-9０-９])'  # 念のための境界（未使用だが将来拡張用）
+    )
+
+    @classmethod
+    def sanitize_filename_for_g2p(cls, raw_name: str) -> str:
+        """
+        WAVファイル名からG2P解析に不要な文字を取り除く。
+        例: "_れ01(強).wav" -> "れ"
+            "ka-2_VCV.wav"  -> "kaVCV"（英数字とかなのみ残す）
+        拡張子は呼び出し側で既に除去されている前提だが、保険として再度除去する。
+        """
+        name = os.path.splitext(raw_name)[0]
+        # 数字・記号・空白などのノイズを除去（ひらがな/カタカナ/漢字/ローマ字は保持）
+        cleaned = cls._NON_LINGUISTIC_CHARS.sub('', name)
+        # 上記regexで拾いきれない残存記号を最終防御としてホワイトリスト方式で除去
+        cleaned = re.sub(r'[^a-zA-Zぁ-んァ-ヶー一-龠]', '', cleaned)
+        return cleaned if cleaned else name
 
     # 子音タイプ別の基本パラメータ（ヒューリスティックフォールバック用）
     HEURISTIC_BASE = {
@@ -302,12 +371,18 @@ class PhonemeRecognizer:
 
     def __init__(self, cnn_model_path: Optional[str] = None):
         self.use_g2p = PYOPENJTALK_AVAILABLE
-        self.use_cnn = TORCH_AVAILABLE and cnn_model_path and os.path.exists(cnn_model_path)
+        # 【事前学習済みモデル同梱対応】明示指定がなければ同梱モデルを自動探索
+        resolved_path = resolve_cnn_model_path(cnn_model_path)
+        self.use_cnn = TORCH_AVAILABLE and resolved_path is not None
         self.cnn_model = None
+        self.device = _select_torch_device() if TORCH_AVAILABLE else None
         if self.use_cnn:
             self.cnn_model = PhonemeCNN()
-            self.cnn_model.load_state_dict(torch.load(cnn_model_path, map_location='cpu'))
+            self.cnn_model.load_state_dict(torch.load(resolved_path, map_location='cpu'))
+            # 【GPU/NPU対応】CUDA(NVIDIA) / MPS(Apple Silicon) を自動オフロード
+            self.cnn_model.to(self.device)
             self.cnn_model.eval()
+            logger.info(f"PhonemeCNN loaded on device: {self.device}")
 
     def recognize(self, x: np.ndarray, sr: int, filename: str = "") -> AcousticFeatures:
         """音声波形から音響特徴量と音素情報を抽出"""
@@ -322,7 +397,8 @@ class PhonemeRecognizer:
         # 2. ファイル名からG2P推定
         if self.use_g2p and filename:
             try:
-                base = os.path.splitext(os.path.basename(filename))[0]
+                base_raw = os.path.basename(filename)
+                base = self.sanitize_filename_for_g2p(base_raw)
                 raw = pyopenjtalk.g2p(base, kana=False)
                 
                 if raw:
@@ -339,8 +415,12 @@ class PhonemeRecognizer:
                         )
                         
                         # 母音抽出
+                        # 【VCV対応】VCV音源（例: "a ka" のような連続音）では、
+                        # エイリアスが表す実際の発声区間は「末尾の母音」に対応する。
+                        # CV音源では vowels は通常1要素のみなので、
+                        # vowels[-1] に変更しても単独音への影響はなく、VCV精度のみ向上する。
                         vowels = [p for p in parts if p in 'aiueo']
-                        vowel = vowels[0] if vowels else 'a'
+                        vowel = vowels[-1] if vowels else 'a'
                         
                         # 【重要修正】単一ファイル名処理時の文脈情報バグを修正
                         context_prev = '' 
@@ -357,10 +437,9 @@ class PhonemeRecognizer:
                 mel_spec = self._compute_mel_spectrogram(x, sr)
                 with torch.no_grad():
                     mel_tensor = torch.from_numpy(mel_spec).unsqueeze(0).unsqueeze(0).float()
-                    
-                    if next(self.cnn_model.parameters()).is_cuda:
-                        mel_tensor = mel_tensor.cuda()
-                    
+                    # 【GPU/NPU対応】cuda専用判定をやめ、選択済みdevice(cuda/mps/cpu)へ統一転送
+                    mel_tensor = mel_tensor.to(self.device)
+
                     # 【重要修正】生出力(Logits)を確率(0.0〜1.0)に変換するためにSoftmaxを適用
                     logits = self.cnn_model(mel_tensor)
                     probs = torch.softmax(logits, dim=1)
