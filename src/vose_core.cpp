@@ -1090,6 +1090,17 @@ void synthesize_note_impl(const SynthNoteParams& p, std::vector<double>& note_bu
 }
 
 // ============================================================
+// レンダリング進捗・キャンセル用コールバック
+//
+// Python(ctypes)側からは CFUNCTYPE(None, c_int) / CFUNCTYPE(c_int) として
+// 渡す想定。呼び出し規約はプラットフォームデフォルト（ctypes標準）。
+//   ProgressCallback:   進捗率(0-100)を通知する。nullptr可（呼ばれない）。
+//   CancelCheckCallback: 非0を返すとレンダリングを中断する。nullptr可。
+// ============================================================
+typedef void (*ProgressCallback)(int percent);
+typedef int  (*CancelCheckCallback)();
+
+// ============================================================
 // extern "C" API
 // ============================================================
 
@@ -1139,9 +1150,20 @@ DLLEXPORT void load_embedded_resource(const char* phoneme,
 // ============================================================
  
 
-DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* output_path, int mode_flag)
+static void execute_render_impl(NoteEvent* notes, int note_count, const char* output_path,
+                                 int mode_flag,
+                                 ProgressCallback progress_cb,
+                                 CancelCheckCallback cancel_cb)
 {
+    auto report_progress = [&](int pct) {
+        if (progress_cb) progress_cb(pct);
+    };
+    auto is_cancelled = [&]() -> bool {
+        return cancel_cb && cancel_cb() != 0;
+    };
+
     if (!notes || note_count <= 0 || !output_path) return;
+    if (is_cancelled()) return;
 
     // ================================================================
     // Pro版（Studio Master）の判定とパラメータ設定
@@ -1220,6 +1242,9 @@ DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* outp
     total_samples -= static_cast<int64_t>(kCrossfadeSamples) * xfade_count;
     if (total_samples <= 0) return;
 
+    report_progress(2);
+    if (is_cancelled()) return;
+
     const int64_t pre_buffer_samples =
         static_cast<int64_t>(max_preutterance * kFs / 1000.0);
     const int64_t buffer_total = total_samples + pre_buffer_samples;
@@ -1264,13 +1289,24 @@ DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* outp
 
     // max_threads ずつバッチ処理
     // 各スレッドは独立した tl_scratch（thread_local）を持つため競合しない
+    //
+    // 進捗・キャンセルについて:
+    //   このバッチループが全体の処理時間の大半（合成フェーズ）を占めるため、
+    //   ここでバッチ単位に進捗を通知し、キャンセル要求もここでチェックする。
+    //   進捗レンジは 2%〜80% を合成フェーズに割り当てる
+    //   （0-2%: 準備, 80-95%: 書き込み/後処理, 95-100%: wavwrite）。
+    const int total_renderable = static_cast<int>(renderable_indices.size());
+    bool cancelled_during_synth = false;
+
     for (int batch_start = 0;
-         batch_start < static_cast<int>(renderable_indices.size());
+         batch_start < total_renderable;
          batch_start += max_threads)
     {
+        if (is_cancelled()) { cancelled_during_synth = true; break; }
+
         const int batch_end = std::min(
             batch_start + max_threads,
-            static_cast<int>(renderable_indices.size()));
+            total_renderable);
 
         std::vector<std::thread> threads;
         threads.reserve(batch_end - batch_start);
@@ -1284,7 +1320,15 @@ DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* outp
             });
         }
         for (auto& t : threads) t.join();
+
+        if (total_renderable > 0) {
+            const int pct = 2 + static_cast<int>(
+                (static_cast<double>(batch_end) / total_renderable) * 78.0);
+            report_progress(std::min(pct, 80));
+        }
     }
+
+    if (cancelled_during_synth || is_cancelled()) return;
 
     // ----------------------------------------------------------------
     // パス2-B: 書き込みフェーズ
@@ -1330,6 +1374,9 @@ DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* outp
                           : note_samples;
         last_note_rendered = true;
     }
+
+    report_progress(85);
+    if (is_cancelled()) return;
 
     // ----------------------------------------------------------------
     // BigVGAN ボコーダー処理
@@ -1491,6 +1538,8 @@ DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* outp
             std::vector<float> chunk_mel(kNMels * kChunkFrames);
 
             for (int t_start = 0; t_start < n_frames; t_start += kChunkFrames - kOverlapFrames) {
+                if (is_cancelled()) return;
+
                 // メルchunkを [1, 80, 256] に充填（足りない部分は末尾フレームで埋める）
                 for (int t = 0; t < kChunkFrames; ++t) {
                     const int src_t = std::min(t_start + t, n_frames - 1);
@@ -1541,17 +1590,47 @@ DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* outp
             for (int i = 0; i < n_src; ++i)
                 bigvgan_out[i] = std::clamp(static_cast<double>(out_pcm[i]), -1.0, 1.0);
 
+            report_progress(95);
+            if (is_cancelled()) return;
             wavwrite(bigvgan_out.data(), n_src, out_fs, out_bit_depth, output_path);
 
         } else {
             // BigVGAN無効時（Pro版としてビルドされているがモデル未ロード時）: WORLD出力をそのまま書き出す
+            report_progress(95);
+            if (is_cancelled()) return;
             wavwrite(src, n_src, out_fs, out_bit_depth, output_path);
         }
 #else
         // 無印版ビルド時: ONNX関連をすべて無視してWORLD出力をそのまま書き出す
+        report_progress(95);
+        if (is_cancelled()) return;
         wavwrite(src, n_src, out_fs, out_bit_depth, output_path);
 #endif
     }
+
+    report_progress(100);
+}
+
+// ============================================================
+// execute_render / execute_render_cancelable
+//   公開APIの2種類:
+//     - execute_render: 従来通りのシグネチャ（後方互換用）。
+//     - execute_render_cancelable: 進捗コールバックとキャンセルチェックを
+//       追加した新API。GUI側（Python）はこちらを使うことでプログレスバーと
+//       キャンセルボタンを実装できる。
+// ============================================================
+
+DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* output_path, int mode_flag)
+{
+    execute_render_impl(notes, note_count, output_path, mode_flag, nullptr, nullptr);
+}
+
+DLLEXPORT void execute_render_cancelable(NoteEvent* notes, int note_count, const char* output_path,
+                                          int mode_flag,
+                                          ProgressCallback progress_cb,
+                                          CancelCheckCallback cancel_cb)
+{
+    execute_render_impl(notes, note_count, output_path, mode_flag, progress_cb, cancel_cb);
 }
 
 // 🚀 【新規追加】PipelineBridgeから転送された構造体配列をC++のベクタにコピーする
