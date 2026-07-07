@@ -646,51 +646,42 @@ class WorkerSignals(QObject):
     progress = Signal(int, float)   # (進捗率 0-100, 推定残り時間 秒)
 
 
+
 class SynthesisWorker(QRunnable):
     """
     非同期レンダリングワーカー。
     ノートをチャンク分割し、進捗・ETA・キャンセルに対応する。
     """
-    def __init__(self, vose_core, notes_data, output_path, is_pro=False):
+    def __init__(self, vose_core, raw_notes, output_path, is_pro=False):
         super().__init__()
         self.vose_core = vose_core
-        self.notes_data = notes_data          # ノート辞書のリスト（未変換）
+        self.raw_notes = raw_notes          # ノート辞書のリスト
         self.output_path = output_path
         self.is_pro = is_pro
         self.signals = WorkerSignals()
-        self._cancelled = False               # キャンセル要求フラグ
-        self._timer = QElapsedTimer()         # ETA計測用
+        self._cancelled = False
+        self._timer = QElapsedTimer()
 
     def cancel(self):
         """キャンセル要求をセットする（協調的キャンセル）"""
         self._cancelled = True
 
-    @staticmethod
-    def _prepare_c_note_event(python_note):
-        """1ノート分のPython辞書 → CNoteEvent (ctypes構造体) 変換"""
-        # 既存の prepare_c_note_event 関数を利用（main_window.py 内）
-        # ここでは main_window のグローバル関数を使う想定。
-        # 循環参照を避けるため、import はメソッド内で行う。
-        from modules.gui.main_window import prepare_c_note_event
-        return prepare_c_note_event(python_note)
-
     def run(self):
+        # ★★★ ここで temp_dir を None で初期化（finally 対策） ★★★
+        temp_dir = None
         try:
-            total = len(self.notes_data)
+            total = len(self.raw_notes)
             if total == 0:
                 self.signals.error.emit("レンダリングするノートがありません。")
                 return
 
-            # --- チャンクサイズの決定（最大100チャンク、1チャンク最低1ノート） ---
+            # チャンクサイズの決定（最大50チャンク、1チャンク最低1ノート）
             chunk_size = max(1, min(50, total // 20 + 1))
             num_chunks = (total + chunk_size - 1) // chunk_size
 
-            # --- 一時ディレクトリの作成 ---
             temp_dir = tempfile.mkdtemp(prefix="vose_render_")
-            chunk_paths = []
             combined_audio = []
 
-            # --- ETA計測開始 ---
             self._timer.start()
             processed_count = 0
 
@@ -700,43 +691,30 @@ class SynthesisWorker(QRunnable):
                     self.signals.error.emit("ユーザーによりキャンセルされました")
                     return
 
-                chunk_notes = self.notes_data[i:i + chunk_size]
+                chunk_notes = self.raw_notes[i:i + chunk_size]
                 chunk_count = len(chunk_notes)
 
                 # --- C言語構造体配列の生成 ---
-                from modules.ffi import CNoteEvent  # 型定義をインポート
                 c_notes_array = (CNoteEvent * chunk_count)()
                 keep_alive = []  # NumPy配列等のGC保護
 
                 for idx, note_dict in enumerate(chunk_notes):
-                    # 既存の prepare_c_note_event を使って変換（ポインタや配列は内部で保持）
-                    c_event = self._prepare_c_note_event(note_dict)
-                    # CNoteEvent 構造体はフィールドがそのまま代入できる
+                    c_event = prepare_c_note_event(note_dict)
                     c_notes_array[idx] = c_event
-                    # 注意: prepare_c_note_event 内で確保した配列は keep_alive に追加する必要があるが、
-                    # 今回は prepare_c_note_event がポインタのみを返す前提。
-                    # 安全のため、prepare_c_note_event 内で確保した配列を返り値に含めるよう修正推奨。
-                    # ここでは簡易実装として、元の note_dict から再構築する。
-                    # より確実にするには prepare_c_note_event を改造するが、本実装では
-                    # 各フィールドを個別に設定する方式で進める。
-                
-                # --- 注意: prepare_c_note_event が配列を返さない場合の代替 ---
-                # ここでは、prepare_c_note_event が ctypes 構造体を返すと仮定し、
-                # 内部で確保した配列が解放されないよう一時変数に保持する。
-                # もしくは、このループ内で直接 NumPy→ctypes 変換を行う。
-                # より堅牢にするため、ここでは直接変換する実装に切り替える。
-                # （実際のコードでは、既存の prepare_c_note_event を参照するか、
-                #  以下のような実装に置き換える）
-                # 今回は説明のため、簡易版として既存関数を呼び出す形を維持。
-                # 実際の修正時は、prepare_c_note_event が内部で確保した配列を
-                # 返せるように改良することを推奨。
 
-                # ★ ここで「チャンクごとの c_notes_array」が正しく構築されていること
+                    # ★ 配列を保持する（GCから保護）
+                    pitch_arr = as_c_double_array(note_dict.get('pitch_curve') or [440.0])
+                    gender_arr = as_c_double_array(note_dict.get('gender_curve') or [0.5] * len(pitch_arr))
+                    tension_arr = as_c_double_array(note_dict.get('tension_curve') or [0.5] * len(pitch_arr))
+                    breath_arr = as_c_double_array(note_dict.get('breath_curve') or [0.0] * len(pitch_arr))
+                    vib_depth_arr = as_c_double_array(note_dict.get('vibrato_depth_curve') or [0.0] * len(pitch_arr))
+                    vib_rate_arr = as_c_double_array(note_dict.get('vibrato_rate_curve') or [5.5] * len(pitch_arr))
+                    keep_alive.extend([pitch_arr, gender_arr, tension_arr, breath_arr, vib_depth_arr, vib_rate_arr])
 
                 # --- チャンク出力パス ---
                 chunk_path = os.path.join(temp_dir, f"chunk_{i:06d}.wav")
 
-                # --- C++ エンジン実行（mode_flag: Pro=1 / Free=0） ---
+                # --- C++ エンジン実行 ---
                 mode_flag = 1 if self.is_pro else 0
                 self.vose_core.execute_render(
                     c_notes_array,
@@ -747,22 +725,17 @@ class SynthesisWorker(QRunnable):
 
                 # --- レンダリング結果の読み込み ---
                 if os.path.exists(chunk_path):
-                    import soundfile as sf
                     data, sr = sf.read(chunk_path)
                     combined_audio.append(data)
-                    chunk_paths.append(chunk_path)
 
                 # --- 進捗・ETA更新 ---
                 processed_count += chunk_count
                 progress = int((processed_count / total) * 100)
-                elapsed = self._timer.elapsed() / 1000.0  # 秒
-                if progress > 0:
-                    eta = (elapsed / progress) * (100 - progress)
-                else:
-                    eta = 0.0
+                elapsed = self._timer.elapsed() / 1000.0
+                eta = (elapsed / progress) * (100 - progress) if progress > 0 else 0.0
                 self.signals.progress.emit(progress, eta)
 
-            # --- キャンセルチェック（ループ後） ---
+            # --- キャンセルチェック ---
             if self._cancelled:
                 self.signals.error.emit("ユーザーによりキャンセルされました")
                 return
@@ -773,10 +746,8 @@ class SynthesisWorker(QRunnable):
                 return
 
             final_audio = np.concatenate(combined_audio)
-            import soundfile as sf
             sf.write(self.output_path, final_audio, 44100)
 
-            # --- 完了通知 ---
             self.signals.finished.emit(self.output_path)
 
         except Exception as e:
@@ -784,13 +755,12 @@ class SynthesisWorker(QRunnable):
             traceback.print_exc()
             self.signals.error.emit(str(e))
         finally:
-            # --- 一時ファイル/ディレクトリのクリーンアップ ---
-            try:
-                if os.path.exists(temp_dir):
+            # ★★★ temp_dir が None でない場合のみ削除 ★★★
+            if temp_dir is not None and os.path.exists(temp_dir):
+                try:
                     shutil.rmtree(temp_dir)
-            except Exception:
-                pass
-
+                except Exception:
+                    pass
 
 class AutoOtoEngine:
     """高度な音響特徴量（スペクトル・減衰率）を利用した適応型oto.iniジェネレーター"""
