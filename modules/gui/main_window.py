@@ -5532,6 +5532,21 @@ class MainWindow(
                 self.progress_bar.setRange(0, 0) # ぐるぐる回るモード
                 self.progress_bar.setVisible(True)
 
+            # シグナルの接続
+            worker.signals.finished.connect(self.on_render_success)
+            worker.signals.error.connect(self.on_render_failed)
+
+            # UI状態変更（レンダリング開始）
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setVisible(True)
+            self.render_eta_label.setText("ETA: 計算中...")
+            self.render_btn.setEnabled(False)
+
+            # ★ キャンセルボタンを表示・有効化
+            self.cancel_render_btn.setVisible(True)
+            self.cancel_render_btn.setEnabled(True)
+
             # ワーカーの作成
             worker = SynthesisWorker(
                 self.vose_core, 
@@ -5541,12 +5556,12 @@ class MainWindow(
                 is_pro=is_pro #有料版かどうか
             )
             
-            # シグナルの接続
-            worker.signals.finished.connect(self.on_render_success)
-            worker.signals.error.connect(self.on_render_failed)
+
 
             # スレッドプールで実行開始（これでGUIが固まらなくなる）
             QThreadPool.globalInstance().start(worker)
+
+        
 
         except Exception as e:
             self.on_render_failed(str(e))
