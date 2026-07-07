@@ -5573,6 +5573,7 @@ class MainWindow(
             self.progress_bar.setVisible(False)
         self.statusBar().showMessage(f"レンダリング完了: {output_wav}")
         self.play_rendered_audio(output_wav)
+        
 
     def on_render_failed(self, error_msg):
         """レンダリング失敗時の処理"""
