@@ -7,6 +7,7 @@ import logging
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont
+from PySide6.QtCore import QTimer
 
 # --- 自作モジュールのインポート ---
 # フォルダ構成に合わせてパスを調整（絶対インポートを推奨）
