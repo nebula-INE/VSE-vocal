@@ -1,7 +1,7 @@
 # layout_manager.py
 from PySide6.QtCore import QSettings, QByteArray
 from PySide6.QtWidgets import QMainWindow
-from typing import Any, cast
+from typing import cast
 
 def save_layout(window: QMainWindow):
     """ウィンドウの位置・サイズ・状態を保存します。"""
