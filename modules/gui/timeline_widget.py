@@ -667,6 +667,71 @@ class TimelineWidget(QWidget):
         self._draw_playhead(p)
         p.end()
 
+    def trigger_flash(self, note: Any, flash_type: str = "add") -> None:
+        """ノートの追加・削除時にグリッド同期型の美麗なフェードエフェクトを発生させる"""
+        if not hasattr(self, "_transient_flashes"):
+            self._transient_flashes = []
+
+        # オブジェクトそのものではなく固定の「時間・音高」を記録するため、
+        # 削除されたノートであってもその座標にエフェクトを焼き付けることが可能
+        flash_item = {
+            "start_time": float(note.start_time),
+            "duration": float(note.duration),
+            "note_number": int(note.note_number),
+            "type": flash_type,
+            "alpha": 220 if flash_type == "add" else 255
+        }
+        self._transient_flashes.append(flash_item)
+        
+        # 40ms間隔（約25fps）で滑らかにフェードアウトを計算するタイマーループ
+        self._run_flash_animation_step(flash_item, steps=8)
+
+    def _run_flash_animation_step(self, flash_item: dict, steps: int) -> None:
+        from PySide6.QtCore import QTimer
+        if steps <= 0:
+            if flash_item in self._transient_flashes:
+                self._transient_flashes.remove(flash_item)
+            self.update()
+            return
+
+        # 指数関数的にアルファを減衰させて滑らかな消え方を演出
+        flash_item["alpha"] = int(flash_item["alpha"] * 0.55)
+        self.update()
+        
+        QTimer.singleShot(40, lambda: self._run_flash_animation_step(flash_item, steps - 1))
+
+    def _draw_transient_flashes(self, p: QPainter) -> None:
+        """現在のスクロール・ズーム状態を毎フレーム動的に反映してエフェクトを描画"""
+        if not hasattr(self, "_transient_flashes") or not self._transient_flashes:
+            return
+
+        for f in self._transient_flashes:
+            x = self.time_to_x(f["start_time"])
+            y = (127 - f["note_number"]) * self.key_height_pixels - self.scroll_y_offset
+            w = self.seconds_to_beats(f["duration"]) * self.pixels_per_beat
+            h = self.key_height_pixels
+
+            rect = QRectF(x, y, w, h)
+            
+            # 可視範囲外（画面外）ならクリッピングして計算リソースを保護
+            if rect.right() < 0 or rect.left() > self.width():
+                continue
+
+            p.save()
+            if f["type"] == "add":
+                # 追加時：サイバーゴールド（金色）の鮮烈な枠線＋ネオン塗り
+                gold = QColor(255, 215, 0, f["alpha"])
+                p.setPen(QPen(gold, 2, Qt.PenStyle.SolidLine))
+                p.setBrush(QBrush(QColor(255, 215, 0, int(f["alpha"] * 0.25))))
+                p.drawRect(rect)
+            elif f["type"] == "delete":
+                # 削除時：熱源が融解するように消え去るネオンオレンジ
+                orange = QColor(255, 69, 0, f["alpha"])
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(orange))
+                p.drawRect(rect)
+            p.restore()
+
     def resizeEvent(self, event: Any) -> None:
         """ウィンドウリサイズ時にグリッドキャッシュを無効化する"""
         self._invalidate_grid()
