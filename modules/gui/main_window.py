@@ -2059,8 +2059,8 @@ class MainWindow(
         
         # 💡 ここも "vocal" に統一して設定の不一致を防ぐ
         settings = QSettings("VO-SE", "vocal")
-        theme_value = settings.value("theme", "dark")
-        self.apply_theme(str(theme_value))
+        heme_value = settings.value("theme", "dark")
+        apply_theme(str(theme_value))  # 💡 グローバル関数として呼び出す
 
     def toggle_theme(self):
         """テーマの切り替えと保存、UIの更新を行う"""
