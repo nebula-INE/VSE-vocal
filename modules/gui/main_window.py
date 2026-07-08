@@ -2258,7 +2258,7 @@ class MainWindow(
     # ==========================================================================
     def setup_toolbar(self):
         """上部ツールバー：再生・録音・テンポ・ファイル操作（モダンボタン化版）"""
-        from PySide6.QtWidgets import QToolBar, QPushButton, QLabel, QLineEdit, QWidget, QSizePolicy
+        from PySide6.QtWidgets import QToolBar, QPushButton, QLabel, QLineEdit, QWidget
         from PySide6.QtCore import QSettings
         from PySide6.QtGui import QAction
         
