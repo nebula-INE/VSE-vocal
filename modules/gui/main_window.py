@@ -23,6 +23,8 @@ from typing import Any, List, Dict, Optional, TYPE_CHECKING, cast
 import importlib
 import importlib.util
 import numpy as np
+import soundfile as sf
+from modules.ffi import CNoteEvent, as_c_double_array
 mido = importlib.import_module("mido") if importlib.util.find_spec("mido") else None
 ort = importlib.import_module("onnxruntime") if importlib.util.find_spec("onnxruntime") else None
 
