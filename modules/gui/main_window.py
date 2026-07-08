@@ -1895,7 +1895,7 @@ class MainWindow(
         """起動時にQSettingsからすべてのカスタムショートカットを完全に復元する"""
         from PySide6.QtCore import QSettings
         from PySide6.QtGui import QKeySequence
-        from PySide6.QtWidgets import QAction
+        from PySide6.QtGui import QAction
         
         # 1. 復元前にアプリ内の全QActionのobjectNameのネームスペースを確定させる
         self.get_all_actions()
@@ -2060,8 +2060,8 @@ class MainWindow(
         
         # 💡 ここも "vocal" に統一して設定の不一致を防ぐ
         settings = QSettings("VO-SE", "vocal")
-        theme = settings.value("theme", "dark")
-        apply_theme(theme)
+        theme_value = settings.value("theme", "dark")
+        self.apply_theme(str(theme_value))
 
     def toggle_theme(self):
         """テーマの切り替えと保存、UIの更新を行う"""
