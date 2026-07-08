@@ -204,7 +204,7 @@ class TimelineWidget(QWidget):
             # CI/環境差異でも落とさない
             pass
 
-def paste_notes_from_clipboard(self) -> None:
+    def paste_notes_from_clipboard(self) -> None:
         """MainWindow互換: クリップボードJSONをノートとして追加。"""
         try:
             from PySide6.QtWidgets import QApplication
