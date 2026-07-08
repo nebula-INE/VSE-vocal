@@ -2055,7 +2055,6 @@ class MainWindow(
 
     def load_theme_setting(self):
         """起動時にQSettingsからテーマを読み込み適用する"""
-        from modules.gui.themes import apply_theme
         from PySide6.QtCore import QSettings
         
         # 💡 ここも "vocal" に統一して設定の不一致を防ぐ
