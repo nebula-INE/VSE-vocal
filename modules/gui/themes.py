@@ -1,9 +1,8 @@
 import os
-from PySide6.QtCore import QFile, QTextStream
+from PySide6.QtCore import QFile, QTextStream, QIODevice, QStringConverter
 from PySide6.QtWidgets import QApplication
 
 # プロジェクト構造に応じたQSSファイルの相対パス
-# (themes.py と同じ階層に themes フォルダがある前提)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 THEME_FILES = {
@@ -21,9 +20,12 @@ def apply_theme(theme_name: str) -> bool:
     Returns:
         bool: 適用に成功した場合は True、失敗した場合は False
     """
+    # 🌟 修正ポイント1: QApplication のインスタンスを取得
+    # Pyright に 'QApplication'（または QWidget 派生）であることを明示し、
+    # setStyleSheet メソッドを安全に呼び出せるようにします。
     app = QApplication.instance()
-    if not app:
-        print("[Theme Error] QApplication instance does not exist.")
+    if not isinstance(app, QApplication):
+        print("[Theme Error] QApplication instance does not exist or is not fully initialized.")
         return False
 
     # 指定されたテーマがない場合は "dark" をデフォルトにする
@@ -39,11 +41,18 @@ def apply_theme(theme_name: str) -> bool:
 
     # ファイルの読み込みと適用
     file = QFile(file_path)
-    if file.open(QFile.ReadOnly | QFile.Text):
+    
+    # 🌟 修正ポイント2: OpenModeFlag の明示 (Qt6 仕様)
+    # QFile.ReadOnly や QFile.Text は PySide6 では属性エラーになります。
+    # 正しくは QIODevice.OpenModeFlag からビットオアで結合します。
+    if file.open(QIODevice.OpenModeFlag.ReadOnly | QIODevice.OpenModeFlag.Text):
         try:
             stream = QTextStream(file)
-            # 文字コードの問題を防ぐためUTF-8を明示（必要に応じて）
-            stream.setEncoding(QTextStream.Encoding.Utf8) 
+            
+            # 🌟 修正ポイント3: QStringConverter を使ったエンコーディング指定 (Qt6 仕様)
+            # QTextStream.Encoding.Utf8 は旧仕様（Qt5）です。
+            # PySide6 では QStringConverter.Encoding.Utf8 を使用します。
+            stream.setEncoding(QStringConverter.Encoding.Utf8) 
             qss = stream.readAll()
             
             # アプリケーション全体にスタイルシートを適用
