@@ -3,6 +3,7 @@ from PySide6.QtCore import QSettings, QByteArray
 from PySide6.QtWidgets import QMainWindow
 from typing import cast
 
+
 def save_layout(window: QMainWindow):
     """ウィンドウの位置・サイズ・状態を保存します。"""
     settings = QSettings("VO-SE", "Pro")
