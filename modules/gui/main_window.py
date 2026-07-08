@@ -2005,6 +2005,39 @@ class MainWindow(
                 print(f"INFO: Partner ID-{partner_id:02d} ({status}) has been selected.")
 
         print(f"✅ Character management: '{display_name}' is now active.")
+        
+
+    def load_theme_setting(self):
+        """起動時にQSettingsからテーマを読み込み適用する"""
+        from modules.gui.themes import apply_theme
+        from PySide6.QtCore import QSettings
+        
+        # 💡 ここも "vocal" に統一して設定の不一致を防ぐ
+        settings = QSettings("VO-SE", "vocal")
+        theme = settings.value("theme", "dark")
+        apply_theme(theme)
+
+    def toggle_theme(self):
+        """テーマの切り替えと保存、UIの更新を行う"""
+        from modules.gui.themes import apply_theme
+        from PySide6.QtCore import QSettings
+        
+        # 💡 アプリケーション識別名を "vocal" で統一
+        settings = QSettings("VO-SE", "vocal")
+        current = settings.value("theme", "dark")
+        
+        # 新しいテーマの決定
+        new_theme = "light" if current == "dark" else "dark"
+        
+        # 適用に成功した場合のみ設定を保存
+        if apply_theme(new_theme):
+            settings.setValue("theme", new_theme)
+            self.statusBar().showMessage(f"テーマを {new_theme} に切り替えました", 3000)
+            
+            # 🔄 修正: theme_action ではなく theme_btn のテキストを切り替える
+            if hasattr(self, 'theme_btn'):
+                btn_text = "🌙 ダークモードへ" if new_theme == "light" else "☀️ ライトモードへ"
+                self.theme_btn.setText(btn_text)
 
 
     def init_ui(self) -> None:
@@ -2016,8 +2049,10 @@ class MainWindow(
         self.setGeometry(100, 100, 1200, 800)
         
         # 2. セントラルウィジェットとメインレイアウトの確定
-        # self.main_layout をクラス属性として保持し、他メソッドからのアクセスを保証
         central_widget = QWidget()
+        # 💡 重要: QSS側で背景色を安全に適用するため、オブジェクト名を設定します
+        central_widget.setObjectName("centralWidget") 
+        
         self.setCentralWidget(central_widget)
         self.main_layout = QVBoxLayout(central_widget)
         self.main_layout.setContentsMargins(5, 5, 5, 5)
@@ -2030,24 +2065,25 @@ class MainWindow(
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.effects_dock)
 
         # 3. 各セクションの順次セットアップ
-        # 依存関係（setup_actionsはtimeline_widgetとQActionを必要とし、
-        # setup_menusはそのQActionを必要とするため、この順序が必須）
         self.setup_main_editor_area()  # 1. timeline_widget生成
-        self.setup_actions()           # 2. QAction定義(copy_action/paste_action/save_action)
+        self.setup_actions()           # 2. QAction定義
         self.setup_menus()             # 3. QActionをメニューに登録
+        
+        # 💡 注意: setup_toolbar 内で self.toggle_theme を呼び出すため、
+        # ツールバー構築の前にテーマ管理メソッドがクラスに定義されている必要があります。
         self.setup_toolbar()
-        # 第2パネル: AI解析・自動歌詞配置・キャラ/MIDI選択・編集モード切替・
-        # 録音・音源再スキャン。以前は一度も呼ばれておらず、これらの機能に
-        # アクセスする手段が画面上に存在しなかった。
+        
         self.setup_control_panel()
         self.setup_bottom_panel()
         self.setup_status_bar()
         self._set_transport_time(0.0)
         self.setup_voice_gallery()
 
-        # 4. スタイルと初期状態の適用
-        # hasattrによるチェックに加え、初期化済みフラグ等で安全に呼び出し
-        self.apply_apple_refined_style()
+        # 4. 新しいスタイル（外部QSSテーマ）と初期状態の適用
+        # 🔄 古い self.apply_apple_refined_style() を廃止し、永続化されたテーマをロード
+        self.load_theme_setting()
+        
+        # その他の初期スタイル調整があれば実行
         self._apply_initial_styles()
 
     def apply_apple_refined_style(self) -> None:
@@ -2220,10 +2256,11 @@ class MainWindow(
     # ==========================================================================
     # UI セクション構築
     # ==========================================================================
-
     def setup_toolbar(self):
-        """上部ツールバー：再生・録音・テンポ・ファイル操作（省略なし統合版）"""
-        from PySide6.QtWidgets import QToolBar, QPushButton, QLabel, QLineEdit, QWidget
+        """上部ツールバー：再生・録音・テンポ・ファイル操作（モダンボタン化版）"""
+        from PySide6.QtWidgets import QToolBar, QPushButton, QLabel, QLineEdit, QWidget, QSizePolicy
+        from PySide6.QtCore import QSettings
+        from PySide6.QtGui import QAction
         
         self.toolbar = QToolBar("Main Toolbar")
         self.addToolBar(self.toolbar)
@@ -2260,9 +2297,10 @@ class MainWindow(
 
         self.toolbar.addSeparator()
 
-         # 読み上げ
+        # 読み上げ
         self.talk_button = QPushButton("読み上げ")
         self.talk_button.clicked.connect(self.on_talk)
+        self.toolbar.addWidget(self.talk_button)
         
         # 2. テンポ設定
         self.toolbar.addWidget(QLabel(" Tempo: "))
@@ -2273,23 +2311,19 @@ class MainWindow(
 
         self.toolbar.addSeparator()
 
-        # 3. WAVファイル読み込み（追加）
+        # 3. WAVファイル読み込み
         self.open_wav_btn = QPushButton("OPEN WAV")
         self.open_wav_btn.setObjectName("SecondaryButton")
         self.open_wav_btn.clicked.connect(self.open_audio)
         self.toolbar.addWidget(self.open_wav_btn)
 
         # 4. Cエンジン・レンダリング
-        # 以前は execute_render (print文のみのダミー) に接続されており、
-        # ボタンを押しても何も起きなかった。実際にノートデータの準備から
-        # C++エンジンでのレンダリング・再生までを行う
-        # on_render_button_clicked に接続する。
         self.render_btn = QPushButton("RENDER (C++ ENGINE)")
         self.render_btn.setObjectName("PrimaryButton")
         self.render_btn.clicked.connect(self.on_render_button_clicked)
         self.toolbar.addWidget(self.render_btn)
 
-         # ペンモードトグル
+        # ペンモードトグル
         self.pen_mode_action = QAction("✏️ ペンモード", self)
         self.pen_mode_action.setCheckable(True)
         self.pen_mode_action.triggered.connect(self.on_pen_mode_toggled)
@@ -2302,8 +2336,19 @@ class MainWindow(
 
         # 右端を整えるためのスペーサー
         spacer = QWidget()
-        self.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
+        spacer.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
         self.toolbar.addWidget(spacer)
+
+        # 🌟 変更: QActionからモダンなQPushButtonへ変更
+        settings = QSettings("VO-SE", "Pro")
+        current_theme = settings.value("theme", "dark")
+        btn_text = "🌙 ダークモードへ" if current_theme == "light" else "☀️ ライトモードへ"
+        
+        self.theme_btn = QPushButton(btn_text)
+        # 他の2次ボタンと見た目を揃えるため、必要ならオブジェクト名を設定
+        self.theme_btn.setObjectName("SecondaryButton") 
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        self.toolbar.addWidget(self.theme_btn)
 
     def setup_main_editor_area(self):
         """メインエディタエリア（トラックリスト + タイムライン）"""
