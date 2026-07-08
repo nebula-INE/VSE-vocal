@@ -81,17 +81,25 @@ void VoseAudioProcessor::pushTestNote (int midiNoteNumber)
     const double hz = 440.0 * std::pow (2.0, (midiNoteNumber - 69) / 12.0);
     constexpr int kRes = 128;
 
-    // oto_parser.py の resolve_alias() と同じ VCV→CV→単独音→部分一致 の順で解決。
-    // prevVowel は簡易実装: 直前に解決したaliasの表記そのものを渡す
-    // (本来は「末尾の母音ラベル」を音素解析器で求めるべき。TODOフェーズ2後半)。
-    const auto* entry = otoDb.resolveAlias (testLyric, lastResolvedVowel);
+    // vcv_resolver.py の VcvResolver.resolve_note() と同じ手順:
+    //   1. 音源にVCVエイリアスが存在する場合のみ、前ノートの歌詞から末尾母音を判定
+    //   2. resolveAlias(lyric, prevVowel) で VCV→CV→単独音→部分一致 の順に解決
+    juce::String prevVowel;
+    if (otoDb.hasVcv() && prevLyric.isNotEmpty())
+        prevVowel = vowelClassifier.trailingVowel (prevLyric);
+
+    const auto* entry = otoDb.resolveAlias (testLyric, prevVowel);
 
     if (entry == nullptr)
     {
+        // Python版のフォールバック（entryが無ければlyricそのものをaliasとして使う）
+        // に倣うが、C++側はload_embedded_resource未登録のキーを渡しても
+        // find_voice_refが失敗するだけで済む（クラッシュはしない）。
         juce::Logger::writeToLog ("VO-SE: 歌詞 '" + testLyric + "' に対応するoto.iniエントリが見つかりません。"
                                    "loadVoiceDirectory() で音源フォルダを読み込んでいますか？");
-        return;
     }
+
+    const juce::String aliasToUse = (entry != nullptr) ? entry->alias : testLyric;
 
     std::vector<double> pitchCurve (kRes, hz);
     std::vector<double> genderCurve (kRes, (double) apvts.getRawParameterValue ("gender")->load());
@@ -99,10 +107,10 @@ void VoseAudioProcessor::pushTestNote (int midiNoteNumber)
     std::vector<double> breathCurve (kRes, (double) apvts.getRawParameterValue ("breath")->load());
 
     // wav_path フィールドには実パスではなく oto.ini の alias（音源キー）を渡す。
-    // vose_core::find_voice_ref はこのキーで load_embedded_resource 済みのPCMを検索する。
-    voice.pushNote (nextNoteId++, entry->alias, pitchCurve, genderCurve, tensionCurve, breathCurve);
+    // vose_core::find_voice_ref / g_oto_db はこのキーで検索する。
+    voice.pushNote (nextNoteId++, aliasToUse, pitchCurve, genderCurve, tensionCurve, breathCurve);
 
-    lastResolvedVowel = testLyric; // 次ノートのVCV解決用（簡易: 歌詞そのものを母音扱い）
+    prevLyric = testLyric; // 次ノートのVCV解決用（VcvResolver.resolve()のprev_lyric更新と同じ）
 }
 
 void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
