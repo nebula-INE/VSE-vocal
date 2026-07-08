@@ -3,6 +3,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QTableWidget, QTableWidgetI
                                QPushButton, QHeaderView, QKeySequenceEdit, QHBoxLayout, QLabel)
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QAction # 💡 明示的なインポートの追加
+from typing import List, Tuple
 
 class ShortcutSettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -46,8 +48,12 @@ class ShortcutSettingsDialog(QDialog):
             }
         """)
         
-        # メインウィンドウから一意化されたアクションを取得
-        self.actions = parent.get_all_actions() if parent else []
+        # 🌟 修正ポイント1: 変数名を self.shortcut_actions にリネーム
+        # QWidget.actions() メソッドとの名前バッティングを完全に防ぎます。
+        # 親ウィジェットから返ってくる型情報が不確実な場合を想定し、List[Tuple[str, QAction]] として明示。
+        raw_actions = parent.get_all_actions() if parent and hasattr(parent, "get_all_actions") else []
+        self.shortcut_actions: List[Tuple[str, QAction]] = raw_actions
+        
         self.populate_table()
         layout.addWidget(self.table)
         
@@ -72,8 +78,9 @@ class ShortcutSettingsDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def populate_table(self):
-        self.table.setRowCount(len(self.actions))
-        for i, (name, action) in enumerate(self.actions):
+        # 🌟 修正ポイント2: 変更した変数名を参照
+        self.table.setRowCount(len(self.shortcut_actions))
+        for i, (name, action) in enumerate(self.shortcut_actions):
             # アクション表示名（ユーザー編集不可）
             item_name = QTableWidgetItem(name)
             item_name.setFlags(item_name.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -96,7 +103,8 @@ class ShortcutSettingsDialog(QDialog):
         # テーマ保存と連動させるため "vocal" でレジストリを統一
         settings = QSettings("VO-SE", "vocal")
         for i in range(self.table.rowCount()):
-            action = self.actions[i][1]
+            # 🌟 修正ポイント3: 変更した変数名を参照
+            action = self.shortcut_actions[i][1]
             widget = self.table.cellWidget(i, 1)
             if isinstance(widget, QKeySequenceEdit):
                 new_keyseq = widget.keySequence()
