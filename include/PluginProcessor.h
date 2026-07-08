@@ -9,6 +9,7 @@
 #include "VoseBridge.h"
 #include "StreamingVoice.h"
 #include "OtoDatabase.h"
+#include "VowelClassifier.h"
 
 class VoseAudioProcessor : public juce::AudioProcessor
 {
@@ -56,12 +57,13 @@ private:
     // oto.ini解決済みのaliasを wav_path (音源キー) として渡す。
     void pushTestNote (int midiNoteNumber);
 
-    VoseCoreLibrary coreLib;
-    StreamingVoice  voice;
-    OtoDatabase     otoDb;
+    VoseCoreLibrary  coreLib;
+    StreamingVoice   voice;
+    OtoDatabase      otoDb;
+    VowelClassifier  vowelClassifier;
 
     juce::String testLyric { "a" };
-    juce::String lastResolvedVowel; // VCV解決用に前ノートの末尾母音を保持（フェーズ2簡易版）
+    juce::String prevLyric; // VcvResolver.resolve() の prev_lyric と同じ役割
 
     // pull() が要求サンプル数より少なく返した場合に備えたスクラッチバッファ
     juce::AudioBuffer<float> pullScratch;
