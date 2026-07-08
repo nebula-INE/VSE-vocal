@@ -1,0 +1,26 @@
+/* メインウィンドウと、そのセントラルウィジェットのみ背景を適用 */
+QMainWindow, QMainWindow > QWidget {
+    background-color: #1c1c1e;
+}
+
+/* 文字色の基本ルール（QLabelなどをターゲットにする） */
+QLabel, QAbstractButton {
+    color: #f5f5f7;
+}
+
+/* ボタンの洗練されたスタイル */
+QPushButton {
+    background-color: #2c2c2e;
+    color: #f5f5f7;
+    border: 1px solid #48484a;
+    border-radius: 9px;
+    padding: 6px 12px;
+}
+
+QPushButton:hover {
+    background-color: #3a3a3c;
+}
+
+QPushButton:pressed {
+    background-color: #48484a;
+}
