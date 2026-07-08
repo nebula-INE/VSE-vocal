@@ -2056,11 +2056,16 @@ class MainWindow(
     def load_theme_setting(self):
         """起動時にQSettingsからテーマを読み込み適用する"""
         from PySide6.QtCore import QSettings
+        from modules.gui.themes import apply_theme  # 💡 インポート漏れを防ぐため関数内でも安全に確保
         
-        # 💡 ここも "vocal" に統一して設定の不一致を防ぐ
+        # 💡 "vocal" に統一して設定の不一致を防ぐ
         settings = QSettings("VO-SE", "vocal")
-        heme_value = settings.value("theme", "dark")
-        apply_theme(str(theme_value))  # 💡 グローバル関数として呼び出す
+        
+        # ⭕ 修正: 'heme_value' から 'theme_value' にタイポを修正
+        theme_value = settings.value("theme", "dark")
+        
+        # 明示的に str にキャストしてグローバル関数を呼び出す
+        apply_theme(str(theme_value))
 
     def toggle_theme(self):
         """テーマの切り替えと保存、UIの更新を行う"""
