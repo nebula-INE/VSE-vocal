@@ -1,26 +1,187 @@
-/* メインウィンドウと、そのセントラルウィジェットのみ背景を適用 */
-QMainWindow, QMainWindow > QWidget {
-    background-color: #1c1c1e;
-}
+/* ============================================================================
+   ダークテーマ (Apple Refined Dark Style)
+   ============================================================================ */
 
-/* 文字色の基本ルール（QLabelなどをターゲットにする） */
-QLabel, QAbstractButton {
+/* --- メインウィンドウ・共通背景 --- */
+QMainWindow, QDialog {
+    background-color: #1c1c1e;
     color: #f5f5f7;
 }
 
-/* ボタンの洗練されたスタイル */
+/* 汎用コンテナ（リストやタブ、設定エリアなどのベース） */
+QFrame#centralWidget, QFrame#mainFrame {
+    background-color: #1c1c1e;
+}
+
+/* --- テキスト・ラベル --- */
+QLabel {
+    color: #f5f5f7;
+    font-size: 13px;
+}
+QLabel:disabled {
+    color: #86868b;
+}
+
+/* --- ボタン (Push Button) --- */
 QPushButton {
     background-color: #2c2c2e;
     color: #f5f5f7;
     border: 1px solid #48484a;
-    border-radius: 9px;
-    padding: 6px 12px;
+    border-radius: 6px;
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 500;
 }
-
 QPushButton:hover {
     background-color: #3a3a3c;
+    border-color: #636366;
 }
-
 QPushButton:pressed {
     background-color: #48484a;
+}
+QPushButton:disabled {
+    background-color: #1c1c1e;
+    color: #86868b;
+    border-color: #2c2c2e;
+}
+/* アクセントボタン（デフォルトボタン用） */
+QPushButton#accentButton {
+    background-color: #0a84ff;
+    color: #ffffff;
+    border: none;
+}
+QPushButton#accentButton:hover {
+    background-color: #2997ff;
+}
+QPushButton#accentButton:pressed {
+    background-color: #0066cc;
+}
+
+/* --- 入力フィールド (Line Edit / Text Edit) --- */
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background-color: #2c2c2e;
+    color: #f5f5f7;
+    border: 1px solid #48484a;
+    border-radius: 6px;
+    padding: 5px 8px;
+    selection-background-color: #0a84ff;
+    selection-color: #ffffff;
+}
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+    border: 1px solid #0a84ff;
+}
+
+/* --- コンボボックス (Dropdown) --- */
+QComboBox {
+    background-color: #2c2c2e;
+    color: #f5f5f7;
+    border: 1px solid #48484a;
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-width: 6em;
+}
+QComboBox:hover {
+    background-color: #3a3a3c;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 20px;
+    border-left-width: 0px;
+}
+QComboBox QAbstractItemView {
+    background-color: #2c2c2e;
+    color: #f5f5f7;
+    border: 1px solid #48484a;
+    selection-background-color: #0a84ff;
+    selection-color: #ffffff;
+}
+
+/* --- チェックボックス / ラジオボタン --- */
+QCheckBox, QRadioButton {
+    color: #f5f5f7;
+    spacing: 8px;
+}
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid #48484a;
+    background-color: #2c2c2e;
+}
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #636366;
+}
+QCheckBox::indicator:checked {
+    background-color: #0a84ff;
+    border-color: #0a84ff;
+    /* 必要に応じてチェックマーク画像を埋め込み */
+}
+QRadioButton::indicator:checked {
+    background-color: #0a84ff;
+    border-color: #0a84ff;
+}
+
+/* --- スライダー (Slider) --- */
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #48484a;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #ffffff;
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    margin-bottom: -6px;
+    border-radius: 8px;
+}
+QSlider::handle:horizontal:hover {
+    background: #f5f5f7;
+}
+
+/* --- スクロールバー (Scroll Bar) --- */
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 0px;
+}
+QScrollBar::handle:vertical {
+    background: #48484a;
+    min-height: 20px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #636366;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+/* --- タブウィジェット (Tab Widget) --- */
+QTabWidget::pane {
+    border: 1px solid #48484a;
+    background-color: #1c1c1e;
+    top: -1px;
+}
+QTabBar::tab {
+    background-color: #2c2c2e;
+    color: #86868b;
+    padding: 6px 12px;
+    margin-right: 2px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
+QTabBar::tab:selected {
+    background-color: #1c1c1e;
+    color: #f5f5f7;
+    border: 1px solid #48484a;
+    border-bottom-color: #1c1c1e;
+}
+QTabBar::tab:hover:!selected {
+    background-color: #3a3a3c;
+    color: #f5f5f7;
 }
