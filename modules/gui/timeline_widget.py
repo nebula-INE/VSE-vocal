@@ -204,7 +204,7 @@ class TimelineWidget(QWidget):
             # CI/環境差異でも落とさない
             pass
 
-    def paste_notes_from_clipboard(self) -> None:
+def paste_notes_from_clipboard(self) -> None:
         """MainWindow互換: クリップボードJSONをノートとして追加。"""
         try:
             from PySide6.QtWidgets import QApplication
@@ -225,7 +225,6 @@ class TimelineWidget(QWidget):
                     continue
                 
                 # --- 修正ポイント: 定義済みの NoteEventClass (Fallback含む) を使用 ---
-                # これにより start_time などの属性が静的解析でも正しく認識されます
                 note = NoteEventClass(
                     note_number=int(item.get("note_number", 60)),      # ✅ 正しい順序
                     start_time=float(item.get("start_time", 0.0)),
@@ -236,6 +235,9 @@ class TimelineWidget(QWidget):
                 # -----------------------------------------------------------
                 
                 self.notes_list.append(note)
+                
+                # 🌟 追加: ペーストされた各ノートに金色のフェードイン・エフェクトをトリガー
+                self.trigger_flash(note, "add")
 
             self._invalidate_note_rects()  # [OPT-3] ノートが増えたのでキャッシュを無効化
             self.notes_changed_signal.emit()
@@ -250,7 +252,15 @@ class TimelineWidget(QWidget):
         try:
             before_snapshot = self._snapshot_notes()
             before = len(self.notes_list)
+            
+            # 🌟 追加: 実際の配列から削除される前に、選択されたノートをスキャンして消滅エフェクトを焼き付ける
+            for n in self.notes_list:
+                if getattr(n, "is_selected", False):
+                    self.trigger_flash(n, "delete")
+            
+            # ノート配列の削除更新（代表のスマートな内包表記を100%維持）
             self.notes_list = [n for n in self.notes_list if not getattr(n, "is_selected", False)]
+            
             if len(self.notes_list) != before:
                 self.notes_changed_signal.emit()
                 self._commit_edit(before_snapshot, "ノート削除")
