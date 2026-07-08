@@ -1,0 +1,187 @@
+/* ============================================================================
+   ライトテーマ (Apple Refined Light Style)
+   ============================================================================ */
+
+/* --- メインウィンドウ・共通背景 --- */
+QMainWindow, QDialog {
+    background-color: #f5f5f7;
+    color: #1c1c1e;
+}
+
+/* 汎用コンテナ */
+QFrame#centralWidget, QFrame#mainFrame {
+    background-color: #f5f5f7;
+}
+
+/* --- テキスト・ラベル --- */
+QLabel {
+    color: #1c1c1e;
+    font-size: 13px;
+}
+QLabel:disabled {
+    color: #86868b;
+}
+
+/* --- ボタン (Push Button) --- */
+QPushButton {
+    background-color: #e5e5ea;
+    color: #1c1c1e;
+    border: 1px solid #d1d1d6;
+    border-radius: 6px;
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 500;
+}
+QPushButton:hover {
+    background-color: #d1d1d6;
+    border-color: #aeaeb2;
+}
+QPushButton:pressed {
+    background-color: #c7c7cc;
+}
+QPushButton:disabled {
+    background-color: #f5f5f7;
+    color: #c7c7cc;
+    border-color: #e5e5ea;
+}
+/* アクセントボタン（デフォルトボタン用） */
+QPushButton#accentButton {
+    background-color: #007aff;
+    color: #ffffff;
+    border: none;
+}
+QPushButton#accentButton:hover {
+    background-color: #147efb;
+}
+QPushButton#accentButton:pressed {
+    background-color: #0066cc;
+}
+
+/* --- 入力フィールド (Line Edit / Text Edit) --- */
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background-color: #ffffff;
+    color: #1c1c1e;
+    border: 1px solid #d1d1d6;
+    border-radius: 6px;
+    padding: 5px 8px;
+    selection-background-color: #007aff;
+    selection-color: #ffffff;
+}
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
+    border: 1px solid #007aff;
+}
+
+/* --- コンボボックス (Dropdown) --- */
+QComboBox {
+    background-color: #e5e5ea;
+    color: #1c1c1e;
+    border: 1px solid #d1d1d6;
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-width: 6em;
+}
+QComboBox:hover {
+    background-color: #d1d1d6;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 20px;
+    border-left-width: 0px;
+}
+QComboBox QAbstractItemView {
+    background-color: #ffffff;
+    color: #1c1c1e;
+    border: 1px solid #d1d1d6;
+    selection-background-color: #007aff;
+    selection-color: #ffffff;
+}
+
+/* --- チェックボックス / ラジオボタン --- */
+QCheckBox, QRadioButton {
+    color: #1c1c1e;
+    spacing: 8px;
+}
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1px solid #d1d1d6;
+    background-color: #ffffff;
+}
+QRadioButton::indicator {
+    border-radius: 8px;
+}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: #aeaeb2;
+}
+QCheckBox::indicator:checked {
+    background-color: #007aff;
+    border-color: #007aff;
+}
+QRadioButton::indicator:checked {
+    background-color: #007aff;
+    border-color: #007aff;
+}
+
+/* --- スライダー (Slider) --- */
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #d1d1d6;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    background: #ffffff;
+    border: 1px solid #d1d1d6;
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    margin-bottom: -6px;
+    border-radius: 8px;
+}
+QSlider::handle:horizontal:hover {
+    background: #f5f5f7;
+}
+
+/* --- スクロールバー (Scroll Bar) --- */
+QScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 0px;
+}
+QScrollBar::handle:vertical {
+    background: #c7c7cc;
+    min-height: 20px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #aeaeb2;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+/* --- タブウィジェット (Tab Widget) --- */
+QTabWidget::pane {
+    border: 1px solid #d1d1d6;
+    background-color: #f5f5f7;
+    top: -1px;
+}
+QTabBar::tab {
+    background-color: #e5e5ea;
+    color: #8e8e93;
+    padding: 6px 12px;
+    margin-right: 2px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
+QTabBar::tab:selected {
+    background-color: #f5f5f7;
+    color: #1c1c1e;
+    border: 1px solid #d1d1d6;
+    border-bottom-color: #f5f5f7;
+}
+QTabBar::tab:hover:!selected {
+    background-color: #d1d1d6;
+    color: #1c1c1e;
+}
