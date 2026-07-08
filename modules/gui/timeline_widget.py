@@ -177,6 +177,8 @@ class TimelineWidget(QWidget):
         self.setMinimumSize(400, 200)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+
+        self._transient_flashes = []  # トランジェント（一時的）なエフェクト管理用
       
     def copy_selected_notes_to_clipboard(self) -> None:
         """MainWindow互換: 選択ノートをJSONでクリップボードへ。"""
@@ -647,24 +649,22 @@ class TimelineWidget(QWidget):
     }
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        # [OPT-3] 描画前にノート矩形キャッシュを更新
         self._rebuild_note_rects_if_needed()
-
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # [OPT-1] グリッドはキャッシュ済み QPixmap を貼るだけ（毎フレームの線描画ゼロ）
+        
         p.drawPixmap(0, 0, self._ensure_grid_pixmap())
-
         self._draw_audio_waveform(p)
         self._draw_glow(p)
         if self.show_ai_phonemes:
             self._draw_ai_phoneme_ghosts(p)
         self._draw_parameter_curves(p)
+        
         self._draw_notes(p)
+        self._draw_transient_flashes(p)  # 🌟 ここに追加！ノートの上に重ねてフラッシュを描画
+        
         self._draw_selection_rect(p)
         self._draw_playhead(p)
-
         p.end()
 
     def resizeEvent(self, event: Any) -> None:
