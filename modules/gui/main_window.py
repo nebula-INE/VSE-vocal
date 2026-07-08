@@ -1862,6 +1862,52 @@ class MainWindow(
         print("✅ Startup Sequence: All engines initialized.")
         
 
+    def get_all_actions(self) -> list:
+        """アプリ内の全QActionを検出し、名前が空のオブジェクトに対して一意の識別名を動的生成・付与する"""
+        import re
+        from PySide6.QtGui import QAction
+        
+        actions = []
+        for action in self.findChildren(QAction):
+            text = action.text().strip()
+            # 内部セパレータや文字のないシステムアクションはスキップ
+            if not text:
+                continue
+            
+            # 🌟 致命的バグの修正：objectName が無ければ、テキストから安全な識別子を生成して注入する
+            key = action.objectName()
+            if not key:
+                # 記号や空白を除去して安全な英数記号文字列にする
+                sanitized = re.sub(r'[^\w]', '', text)
+                key = f"action_{sanitized}"
+                action.setObjectName(key)  # その場で確定させることで、保存・復元キーの不一致を完全防止
+                
+            actions.append((text, action))
+        return actions
+
+    def open_shortcut_settings(self) -> None:
+        """ショートカット設定ダイアログを展開する"""
+        from modules.gui.settings_dialog import ShortcutSettingsDialog
+        dlg = ShortcutSettingsDialog(self)
+        dlg.exec()
+
+    def load_shortcut_settings(self) -> None:
+        """起動時にQSettingsからすべてのカスタムショートカットを完全に復元する"""
+        from PySide6.QtCore import QSettings
+        from PySide6.QtGui import QKeySequence
+        from PySide6.QtWidgets import QAction
+        
+        # 1. 復元前にアプリ内の全QActionのobjectNameのネームスペースを確定させる
+        self.get_all_actions()
+        
+        # 2. 保存データを巡回してショートカットをマッピング
+        settings = QSettings("VO-SE", "vocal")
+        for action in self.findChildren(QAction):
+            key = f"shortcuts/{action.objectName()}"
+            if settings.contains(key):
+                saved_value = settings.value(key)
+                action.setShortcut(QKeySequence(str(saved_value)))
+                
     def execute_render(self):
         """オーディオ書き出しの実行（省略なし）"""
         print("DEBUG: Rendering started...")
