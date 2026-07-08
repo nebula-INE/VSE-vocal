@@ -82,6 +82,7 @@ try:
     from modules.gui.voice_mixin import VoiceManagerMixin # type: ignore[assignment]
     from modules.gui.mixins.voice_management_mixin import VoiceManagementMixin # type: ignore[assignment]
     from modules.gui.effects_panel import EffectsPanel  # type: ignore[assignment]
+    from modules.gui.themes import apply_theme # type: ignore[assignment]
 except ImportError as e:
     print(f"⚠️ Absolute import failed, falling back to relative: {e}")
     # フォールバック（相対インポート）
