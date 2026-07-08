@@ -7,6 +7,8 @@ import sys
 import time
 import wave
 import json
+import tempfile
+import shutil
 import ctypes
 import threading
 import math
