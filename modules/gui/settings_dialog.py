@@ -1,9 +1,8 @@
 # modules/gui/settings_dialog.py
-import sys
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QTableWidget, QTableWidgetItem, 
                                QPushButton, QHeaderView, QKeySequenceEdit, QHBoxLayout, QLabel)
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QKeySequence, QAction
+from PySide6.QtGui import QKeySequence
 
 class ShortcutSettingsDialog(QDialog):
     def __init__(self, parent=None):
