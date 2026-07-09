@@ -75,8 +75,12 @@ struct ScheduledSongNote
     int    noteNum = 60;
     juce::String lyric;
     double velocity01 = 1.0;       // intensity(0-200) を 0-1 に正規化したもの
-    double vibratoDepthSemitones = 0.0;
-    double vibratoRateHz = 5.5;
+
+    // ポルタメント/ビブラート用の生データ。カーブそのものは
+    // PitchCurveBuilder.h（呼び出し側）が組み立てる。
+    juce::String pbs, pbw, pby;
+    std::optional<UstVibratoParams> vibrato;
+
     std::optional<double> preUtteranceMs;
     std::optional<double> overlapMs;
 };
