@@ -56,12 +56,10 @@ public:
             sn.velocity01   = juce::jlimit (0.0, 1.0, n.intensity / 200.0);
             sn.preUtteranceMs = n.preUtterance;
             sn.overlapMs      = n.overlap;
-
-            if (n.vibrato.has_value())
-            {
-                sn.vibratoDepthSemitones = n.vibrato->depthSemitones();
-                sn.vibratoRateHz         = n.vibrato->rateHz();
-            }
+            sn.pbs = n.pbs;
+            sn.pbw = n.pbw;
+            sn.pby = n.pby;
+            sn.vibrato = n.vibrato;
 
             results.push_back (sn);
             currentTimeSec += durationSec;
@@ -69,14 +67,9 @@ public:
         return results;
     }
 
-    // PBS/PBW/PBY からピッチベンドカーブ(semitone)を生成する。
-    // TODO: extract_portamento_curve() のC++移植。現段階では0埋めのスタブ。
-    // (PBS: 開始オフセットms, PBW: 区間幅msのCSV, PBY: 区間終端の高さsemitoneのCSV
-    //  という仕様は把握済みだが、区分線形補間の実装は次のステップに持ち越す)
-    static std::vector<float> extractPortamentoCurveStub (int resolution = 128)
-    {
-        return std::vector<float> ((size_t) resolution, 0.0f);
-    }
+    // PBS/PBW/PBYからのピッチカーブ生成は PitchCurveBuilder.h に実装している
+    // (vose_pitch::buildPitchCurveHz)。ここでは生データ(pbs/pbw/pby/vibrato)を
+    // ScheduledSongNote にそのまま保持するだけに留める。
 
 private:
     void parse (const juce::String& content, UstProject& project)
