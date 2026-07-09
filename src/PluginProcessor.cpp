@@ -118,22 +118,28 @@ juce::String VoseAudioProcessor::consumeNextLyric()
 
 void VoseAudioProcessor::pushNote (int midiNoteNumber)
 {
-    resolveAndPushNote (midiNoteNumber, consumeNextLyric());
+    constexpr int kRes = 128;
+    const double hz = 440.0 * std::pow (2.0, (midiNoteNumber - 69) / 12.0);
+    std::vector<double> flatCurve (kRes, hz); // ライブMIDIにはポルタメント/ビブラート情報が無いので一定ピッチ
+
+    resolveAndPushNote (flatCurve, consumeNextLyric());
 }
 
 void VoseAudioProcessor::pushSongNote (const ScheduledSongNote& note)
 {
-    resolveAndPushNote (note.noteNum, note.lyric);
-    // TODO: note.vibratoDepthSemitones / vibratoRateHz / velocity01 は
-    // まだ pitchCurve に反映していない（現状は一定ピッチのみ）。
-    // ビブラート適用は UstParser::extractPortamentoCurveStub の実装と
-    // 合わせて次のステップで行う。
+    constexpr int kRes = 128;
+    const double durationMs = note.durationSec * 1000.0;
+
+    // PBS/PBW/PBY(ポルタメント) + VBR(ビブラート) を合成したピッチカーブ。
+    auto curve = vose_pitch::buildPitchCurveHz (note.noteNum, durationMs,
+                                                 note.pbs, note.pbw, note.pby,
+                                                 note.vibrato, kRes);
+    resolveAndPushNote (curve, note.lyric);
 }
 
-void VoseAudioProcessor::resolveAndPushNote (int midiNoteNumber, const juce::String& lyric)
+void VoseAudioProcessor::resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric)
 {
-    const double hz = 440.0 * std::pow (2.0, (midiNoteNumber - 69) / 12.0);
-    constexpr int kRes = 128;
+    const int kRes = (int) pitchCurveHz.size();
 
     // vcv_resolver.py の VcvResolver.resolve_note() と同じ手順:
     //   1. 音源にVCVエイリアスが存在する場合のみ、前ノートの歌詞から末尾母音を判定
@@ -152,14 +158,13 @@ void VoseAudioProcessor::resolveAndPushNote (int midiNoteNumber, const juce::Str
 
     const juce::String aliasToUse = (entry != nullptr) ? entry->alias : lyric;
 
-    std::vector<double> pitchCurve (kRes, hz);
     std::vector<double> genderCurve (kRes, (double) apvts.getRawParameterValue ("gender")->load());
     std::vector<double> tensionCurve (kRes, (double) apvts.getRawParameterValue ("tension")->load());
     std::vector<double> breathCurve (kRes, (double) apvts.getRawParameterValue ("breath")->load());
 
     // wav_path フィールドには実パスではなく oto.ini の alias（音源キー）を渡す。
     // vose_core::find_voice_ref / g_oto_db はこのキーで検索する。
-    voice.pushNote (nextNoteId++, aliasToUse, pitchCurve, genderCurve, tensionCurve, breathCurve);
+    voice.pushNote (nextNoteId++, aliasToUse, pitchCurveHz, genderCurve, tensionCurve, breathCurve);
 
     prevLyric = lyric; // 次ノートのVCV解決用（VcvResolver.resolve()のprev_lyric更新と同じ）
 }
