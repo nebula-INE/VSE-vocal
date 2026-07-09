@@ -64,6 +64,7 @@ void VoseAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     pullScratch.setSize (2, samplesPerBlock);
     anyNoteHeld = false;
+    currentSampleRate = sampleRate;
 
     // StreamingSynthesizer はサンプルレート依存の内部バッファ(RingBuffer)を
     // コンストラクタで確保するので、サンプルレートが分かるここで作り直す。
@@ -76,7 +77,60 @@ void VoseAudioProcessor::releaseResources()
     voice.stop();
 }
 
-void VoseAudioProcessor::pushTestNote (int midiNoteNumber)
+void VoseAudioProcessor::setLyricSequence (const juce::String& spaceSeparatedText)
+{
+    auto tokens = juce::StringArray::fromTokens (spaceSeparatedText, " \t\n\r", "");
+    tokens.removeEmptyStrings();
+    if (tokens.isEmpty())
+        tokens.add ("a");
+
+    const juce::SpinLock::ScopedLockType sl (lyricLock);
+    lyricSequence = tokens;
+    lyricSequenceIndex = 0;
+}
+
+juce::String VoseAudioProcessor::getLyricSequenceText() const
+{
+    const juce::SpinLock::ScopedLockType sl (lyricLock);
+    return lyricSequence.joinIntoString (" ");
+}
+
+juce::String VoseAudioProcessor::consumeNextLyric()
+{
+    // 優先1: MIDI Lyric/Textメタイベント由来（processBlock内でのみ読み書きするので
+    // ロック不要。ここは必ずオーディオスレッドから呼ばれる前提）。
+    if (! midiLyricQueue.empty())
+    {
+        auto lyric = midiLyricQueue.front();
+        midiLyricQueue.pop_front();
+        return lyric;
+    }
+
+    // 優先3: 内蔵歌詞キューUI。ローテーションしてテスト時にループさせ続ける。
+    const juce::SpinLock::ScopedLockType sl (lyricLock);
+    if (lyricSequence.isEmpty())
+        return "a";
+
+    const auto lyric = lyricSequence[lyricSequenceIndex % lyricSequence.size()];
+    lyricSequenceIndex = (lyricSequenceIndex + 1) % lyricSequence.size();
+    return lyric;
+}
+
+void VoseAudioProcessor::pushNote (int midiNoteNumber)
+{
+    resolveAndPushNote (midiNoteNumber, consumeNextLyric());
+}
+
+void VoseAudioProcessor::pushSongNote (const ScheduledSongNote& note)
+{
+    resolveAndPushNote (note.noteNum, note.lyric);
+    // TODO: note.vibratoDepthSemitones / vibratoRateHz / velocity01 は
+    // まだ pitchCurve に反映していない（現状は一定ピッチのみ）。
+    // ビブラート適用は UstParser::extractPortamentoCurveStub の実装と
+    // 合わせて次のステップで行う。
+}
+
+void VoseAudioProcessor::resolveAndPushNote (int midiNoteNumber, const juce::String& lyric)
 {
     const double hz = 440.0 * std::pow (2.0, (midiNoteNumber - 69) / 12.0);
     constexpr int kRes = 128;
@@ -88,18 +142,15 @@ void VoseAudioProcessor::pushTestNote (int midiNoteNumber)
     if (otoDb.hasVcv() && prevLyric.isNotEmpty())
         prevVowel = vowelClassifier.trailingVowel (prevLyric);
 
-    const auto* entry = otoDb.resolveAlias (testLyric, prevVowel);
+    const auto* entry = otoDb.resolveAlias (lyric, prevVowel);
 
     if (entry == nullptr)
     {
-        // Python版のフォールバック（entryが無ければlyricそのものをaliasとして使う）
-        // に倣うが、C++側はload_embedded_resource未登録のキーを渡しても
-        // find_voice_refが失敗するだけで済む（クラッシュはしない）。
-        juce::Logger::writeToLog ("VO-SE: 歌詞 '" + testLyric + "' に対応するoto.iniエントリが見つかりません。"
+        juce::Logger::writeToLog ("VO-SE: 歌詞 '" + lyric + "' に対応するoto.iniエントリが見つかりません。"
                                    "loadVoiceDirectory() で音源フォルダを読み込んでいますか？");
     }
 
-    const juce::String aliasToUse = (entry != nullptr) ? entry->alias : testLyric;
+    const juce::String aliasToUse = (entry != nullptr) ? entry->alias : lyric;
 
     std::vector<double> pitchCurve (kRes, hz);
     std::vector<double> genderCurve (kRes, (double) apvts.getRawParameterValue ("gender")->load());
@@ -110,7 +161,42 @@ void VoseAudioProcessor::pushTestNote (int midiNoteNumber)
     // vose_core::find_voice_ref / g_oto_db はこのキーで検索する。
     voice.pushNote (nextNoteId++, aliasToUse, pitchCurve, genderCurve, tensionCurve, breathCurve);
 
-    prevLyric = testLyric; // 次ノートのVCV解決用（VcvResolver.resolve()のprev_lyric更新と同じ）
+    prevLyric = lyric; // 次ノートのVCV解決用（VcvResolver.resolve()のprev_lyric更新と同じ）
+}
+
+bool VoseAudioProcessor::loadUstFile (const juce::File& ustFile)
+{
+    UstParser parser;
+    auto project = parser.load (ustFile);
+
+    if (project.notes.empty())
+    {
+        juce::Logger::writeToLog ("VO-SE: UST読み込み失敗、またはノートが0件でした: "
+                                   + ustFile.getFullPathName());
+        return false;
+    }
+
+    songNotes = UstParser::toScheduledNotes (project);
+    songNoteCursor = 0;
+    songPositionSec = 0.0;
+    songPlaying = false;
+
+    juce::Logger::writeToLog ("VO-SE: UST読み込み完了。" + juce::String ((int) songNotes.size()) + "ノート、"
+                               + "テンポ=" + juce::String (project.tempo));
+    return true;
+}
+
+void VoseAudioProcessor::startSongPlayback()
+{
+    songNoteCursor = 0;
+    songPositionSec = 0.0;
+    prevLyric.clear();
+    songPlaying = ! songNotes.empty();
+}
+
+void VoseAudioProcessor::stopSongPlayback()
+{
+    songPlaying = false;
 }
 
 void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -118,20 +204,57 @@ void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
 
-    // ---- MIDI処理: pushNote は内部で streaming_render_push_note を呼ぶだけで、
-    // 合成そのものは vose_core 側のワーカースレッドが行う。ここはノンブロッキング。
+    // ---- MIDI処理 ----
+    // 優先1: Lyric(type=5)/Text(type=1)メタイベントを見つけたらキューに積む。
+    // 標準MIDIのカラオケ形式（DAWのピアノロールで歌詞を打ち込む方式）はこれで拾える。
+    // 優先3: 見つからなければ内蔵歌詞キューUIをローテーション消費する(pushNote内)。
+    //
+    // pushNote は streaming_render_push_note を呼ぶだけで、合成そのものは
+    // vose_core側のワーカースレッドが行うため、ここはノンブロッキング。
     for (const auto metadata : midi)
     {
         const auto msg = metadata.getMessage();
-        if (msg.isNoteOn())
+
+        if (msg.isTextMetaEvent())
         {
-            pushTestNote (msg.getNoteNumber());
+            const int metaType = msg.getMetaEventType();
+            if (metaType == 5 || metaType == 1) // 5=Lyric, 1=Text
+                midiLyricQueue.push_back (msg.getTextFromTextMetaEvent());
+        }
+        else if (msg.isNoteOn())
+        {
+            pushNote (msg.getNoteNumber());
             anyNoteHeld = true;
         }
         else if (msg.isNoteOff())
         {
             anyNoteHeld = false;
         }
+    }
+
+    // ---- UST曲スケジューラ: ホストトランスポート非同期の簡易内部クロック ----
+    // このブロックが表す時間窓 [songPositionSec, songPositionSec+blockDurationSec)
+    // に開始時刻が入るノートを全部トリガーする。songNotesは開始時刻順に
+    // 並んでいる前提（UstParser::toScheduledNotesが単調増加で構築するため保証される）。
+    if (songPlaying)
+    {
+        const double blockDurationSec = (double) buffer.getNumSamples() / currentSampleRate;
+        const double windowEnd = songPositionSec + blockDurationSec;
+
+        while (songNoteCursor < songNotes.size() && songNotes[songNoteCursor].startTimeSec < windowEnd)
+        {
+            const auto& sn = songNotes[songNoteCursor];
+            if (! sn.lyric.trim().equalsIgnoreCase ("R")) // 休符は発音しない
+            {
+                pushSongNote (sn);
+                anyNoteHeld = true;
+            }
+            ++songNoteCursor;
+        }
+
+        songPositionSec = windowEnd;
+        if (songNoteCursor >= songNotes.size())
+            songPlaying = false; // 曲の最後まで再生したら自動停止
     }
 
     if (! voice.isActive())
