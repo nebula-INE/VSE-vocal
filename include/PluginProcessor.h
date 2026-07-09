@@ -11,6 +11,7 @@
 #include "OtoDatabase.h"
 #include "VowelClassifier.h"
 #include "UstParser.h"
+#include "PitchCurveBuilder.h"
 #include <deque>
 
 class VoseAudioProcessor : public juce::AudioProcessor
@@ -73,7 +74,9 @@ private:
     void pushSongNote (const ScheduledSongNote& note);
 
     // pushNote/pushSongNote の共通部分（VCV解決 + streaming_render_push_note呼び出し）。
-    void resolveAndPushNote (int midiNoteNumber, const juce::String& lyric);
+    // pitchCurveHz は呼び出し側で組み立て済みのカーブをそのまま使う
+    // (MIDI経由は一定ピッチのフラットカーブ、UST経由はポルタメント/ビブラート込み)。
+    void resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric);
 
     // 優先順位: 1) MIDI Lyric/Textメタイベント由来のキュー（同一ブロック内で
     // オーディオスレッドのみが読み書きするのでロック不要）
