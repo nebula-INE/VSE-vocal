@@ -10,6 +10,8 @@
 #include "StreamingVoice.h"
 #include "OtoDatabase.h"
 #include "VowelClassifier.h"
+#include "UstParser.h"
+#include <deque>
 
 class VoseAudioProcessor : public juce::AudioProcessor
 {
@@ -43,27 +45,65 @@ public:
     void loadVoiceDirectory (const juce::File& dir);
     int  getLoadedAliasCount() const { return otoDb.size(); }
 
-    // テスト用の歌詞をUIから変更できるようにする（フェーズ2 PoC）。
-    // MIDIノート名からの歌詞バインドはフェーズ2後半のTODO。
-    void setTestLyric (const juce::String& lyric) { testLyric = lyric; }
-    juce::String getTestLyric() const { return testLyric; }
+    // 優先3: 内蔵歌詞キューUI（生MIDIキーボード演奏用のフォールバック経路）。
+    // スペース区切りの文字列を受け取り、ノートオンのたびに1語ずつ
+    // ローテーションで消費する（テスト時にループし続けられるように）。
+    // UIスレッド(message thread)から呼ばれるので、オーディオスレッドとの
+    // 共有には短時間のSpinLockを使う（頻度が低いので実用上問題ない）。
+    void setLyricSequence (const juce::String& spaceSeparatedText);
+    juce::String getLyricSequenceText() const;
+
+    // --- UST曲再生（優先1/3のライブMIDIとは独立した経路） ---
+    // ロード成功時 true。songNotes を構築するだけで自動再生はしない。
+    bool loadUstFile (const juce::File& ustFile);
+    void startSongPlayback();  // 曲頭から再生開始
+    void stopSongPlayback();
+    bool isSongPlaying() const { return songPlaying; }
+    int  getLoadedSongNoteCount() const { return (int) songNotes.size(); }
 
     juce::AudioProcessorValueTreeState apvts;
 
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    // MIDIノートオンに応じて streaming API へノートを積む。
-    // oto.ini解決済みのaliasを wav_path (音源キー) として渡す。
-    void pushTestNote (int midiNoteNumber);
+    // ノートオンに応じて次の歌詞を1つ確定し、streaming APIへノートを積む。
+    void pushNote (int midiNoteNumber);
+
+    // USTスケジューラから呼ばれる版。歌詞はキュー消費ではなくUST側の指定を使う。
+    void pushSongNote (const ScheduledSongNote& note);
+
+    // pushNote/pushSongNote の共通部分（VCV解決 + streaming_render_push_note呼び出し）。
+    void resolveAndPushNote (int midiNoteNumber, const juce::String& lyric);
+
+    // 優先順位: 1) MIDI Lyric/Textメタイベント由来のキュー（同一ブロック内で
+    // オーディオスレッドのみが読み書きするのでロック不要）
+    // 2) 内蔵歌詞キューUI（ロック付き、ローテーション）
+    juce::String consumeNextLyric();
 
     VoseCoreLibrary  coreLib;
     StreamingVoice   voice;
     OtoDatabase      otoDb;
     VowelClassifier  vowelClassifier;
 
-    juce::String testLyric { "a" };
+    // 優先1: MIDI Lyric/Textメタイベント由来。processBlock内でのみ触るため
+    // 単一スレッド前提でロック不要（オーディオスレッド専有）。
+    std::deque<juce::String> midiLyricQueue;
+
+    // 優先3: 内蔵歌詞キューUI。message threadから書き込まれるためロックが要る。
+    juce::SpinLock    lyricLock;
+    juce::StringArray lyricSequence { "a" };
+    int               lyricSequenceIndex = 0;
+
     juce::String prevLyric; // VcvResolver.resolve() の prev_lyric と同じ役割
+
+    // --- UST曲再生用スケジューラ状態（オーディオスレッドがprocessBlock内で
+    // サンプル数から自前で経過時間を積算する。ホストのトランスポートには
+    // 同期しないシンプルな内部クロック方式。TODO: AudioPlayHead同期） ---
+    std::vector<ScheduledSongNote> songNotes;
+    size_t songNoteCursor = 0;
+    bool   songPlaying = false;
+    double songPositionSec = 0.0;
+    double currentSampleRate = 44100.0;
 
     // pull() が要求サンプル数より少なく返した場合に備えたスクラッチバッファ
     juce::AudioBuffer<float> pullScratch;
