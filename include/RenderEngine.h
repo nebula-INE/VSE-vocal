@@ -24,10 +24,18 @@
 struct VoseNoteInput
 {
     juce::String wavPath;      // oto_map から解決済みのサンプルパス
-    std::vector<double> pitchCurve;    // Hz
+    std::vector<double> pitchCurve;    // Hz（ベースピッチのみ。ポルタメント/ビブラートは
+                                        // ここでは焼き込まず、コア側のネイティブ処理に任せる）
     std::vector<double> genderCurve;   // 0..1
     std::vector<double> tensionCurve;  // 0..1
     std::vector<double> breathCurve;   // 0..1
+
+    // ネイティブ対応分。execute_render(NoteEvent)専用 —
+    // ストリーミングAPI(VoseStreamNote)には同等フィールドが無いため渡せない
+    // (docs/INTENSITY_API_PROPOSAL.md と同様、ストリーミング側への追加は別途提案が必要)。
+    std::vector<double> portamentoOffsetsCents; // セント単位。pitchCurveと同じ解像度
+    std::vector<double> vibratoDepthCurve;      // 1.0 = デフォルト深さ（vose_core既定）
+    std::vector<double> vibratoRateCurve;       // Hz
 };
 
 class RenderEngine : private juce::Thread
@@ -121,11 +129,28 @@ private:
             cNotes[i].gender_curve         = const_cast<double*> (n.genderCurve.data());
             cNotes[i].tension_curve        = const_cast<double*> (n.tensionCurve.data());
             cNotes[i].breath_curve         = const_cast<double*> (n.breathCurve.data());
-            cNotes[i].vibrato_depth_curve  = nullptr; // フェーズ1ではビブラート未対応
-            cNotes[i].vibrato_rate_curve   = nullptr;
-            cNotes[i].vibrato_curve_length = 0;
-            cNotes[i].portamento_offsets   = nullptr; // フェーズ1ではポルタメント未対応
-            cNotes[i].portamento_length    = 0;
+
+            // ネイティブ対応（vose_core.cpp 1070-1080行目で実際に使われているのを確認済み）。
+            // ただし apply_vibrato() 自体は「ノート後半50%固定・フェードアウト無し・
+            // phase/height無し」という簡易モデルで、USTのVBR(length/fade_in/fade_out/
+            // phase/height)を完全には再現できない。UST由来のノートはこれまで通り
+            // PitchCurveBuilder.h側でビブラートを焼き込んだpitch_curveを使うこと
+            // （このフィールドに同時に値を入れると二重適用になるので注意）。
+            // ここはVBRデータを持たない将来的な用途向けの空きインフラとして残す。
+            cNotes[i].vibrato_depth_curve  = n.vibratoDepthCurve.empty()
+                                              ? nullptr : const_cast<double*> (n.vibratoDepthCurve.data());
+            cNotes[i].vibrato_rate_curve   = n.vibratoRateCurve.empty()
+                                              ? nullptr : const_cast<double*> (n.vibratoRateCurve.data());
+            cNotes[i].vibrato_curve_length = n.vibratoDepthCurve.empty()
+                                              ? 0 : (int) n.vibratoDepthCurve.size();
+
+            // ポルタメントは逆にネイティブ側が簡略化されていない汎用処理
+            // (cents = resample_curve(...); base_f0_val *= pow(2, cents/1200))
+            // なので、忠実度の劣化なくこちらを使ってよい。
+            cNotes[i].portamento_offsets   = n.portamentoOffsetsCents.empty()
+                                              ? nullptr : const_cast<double*> (n.portamentoOffsetsCents.data());
+            cNotes[i].portamento_length    = n.portamentoOffsetsCents.empty()
+                                              ? 0 : (int) n.portamentoOffsetsCents.size();
         }
 
         auto tempFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
