@@ -147,30 +147,62 @@ namespace vose_pitch
         return cents / 100.0; // cents -> semitone
     }
 
-    // ノート1個分のピッチカーブ(Hz)を組み立てる。resolution点、0〜durationMsを均等分割。
-    // ポルタメントとビブラートを両方セミトーン単位で加算してから最後にHzへ変換する。
-    inline std::vector<double> buildPitchCurveHz (int baseMidiNote, double durationMs,
-                                                   const juce::String& pbs, const juce::String& pbw,
-                                                   const juce::String& pby,
-                                                   const std::optional<UstVibratoParams>& vibrato,
-                                                   int resolution)
+    // ノート1個分の「ビブラートのみ」を焼き込んだピッチカーブ(Hz)を組み立てる。
+    // resolution点、0〜durationMsを均等分割。
+    //
+    // 【ポルタメントはここに含めない】VoseStreamNote/NoteEventの両方に
+    // portamento_offsets というネイティブフィールドが存在し、しかも簡略化されて
+    // いない汎用的な処理（セントカーブをそのままF0へ掛けるだけ）なので、
+    // ポルタメントは buildPortamentoCentsCurve() で別カーブとして作り、
+    // ネイティブAPI経由で渡すこと。ここで焼き込むと二重適用になる。
+    //
+    // ビブラートは逆にネイティブ側(apply_vibrato)が「ノート後半50%固定・
+    // フェードアウト無し・phase/height無し」という簡易モデルで、USTのVBR
+    // (length/fade_in/fade_out/phase/height)を再現できないため、
+    // 引き続きここで焼き込む（VoseStreamNoteにはビブラート用フィールドも無い）。
+    inline std::vector<double> buildVibratoPitchCurveHz (int baseMidiNote, double durationMs,
+                                                          const std::optional<UstVibratoParams>& vibrato,
+                                                          int resolution)
     {
         std::vector<double> curve ((size_t) resolution);
+        const int denom = juce::jmax (1, resolution - 1);
+
+        for (int j = 0; j < resolution; ++j)
+        {
+            const double tMs = durationMs * ((double) j / (double) denom);
+
+            double semitoneOffset = 0.0;
+            if (vibrato.has_value())
+                semitoneOffset = vibratoSemitonesAt (*vibrato, tMs, durationMs);
+
+            const double midiNoteWithOffset = (double) baseMidiNote + semitoneOffset;
+            curve[(size_t) j] = 440.0 * std::pow (2.0, (midiNoteWithOffset - 69.0) / 12.0);
+        }
+        return curve;
+    }
+
+    // PBS/PBW/PBYからセミトーンのポルタメントカーブを作り、セント単位に変換して返す。
+    // vose_core の portamento_offsets はセント単位（cents = 100 * semitone）を
+    // 期待している（vose_core.cpp: base_f0_val *= pow(2, cents/1200)）。
+    // resolution・時間軸は buildVibratoPitchCurveHz と揃えること
+    // （コア側は同じ pitch_length を使って resample_curve するため、
+    //  両カーブの index が同じ絶対時刻を指している前提で合成される）。
+    inline std::vector<double> buildPortamentoCentsCurve (const juce::String& pbs, const juce::String& pbw,
+                                                           const juce::String& pby, double durationMs,
+                                                           int resolution)
+    {
+        std::vector<double> curve ((size_t) resolution, 0.0);
 
         PortamentoCurveBuilder portamento;
         portamento.build (pbs, pbw, pby);
+        if (! portamento.valid)
+            return curve; // PBWが無い等 → オフセット無し（0セント）
 
         const int denom = juce::jmax (1, resolution - 1);
         for (int j = 0; j < resolution; ++j)
         {
             const double tMs = durationMs * ((double) j / (double) denom);
-
-            double semitoneOffset = portamento.at (tMs);
-            if (vibrato.has_value())
-                semitoneOffset += vibratoSemitonesAt (*vibrato, tMs, durationMs);
-
-            const double midiNoteWithOffset = (double) baseMidiNote + semitoneOffset;
-            curve[(size_t) j] = 440.0 * std::pow (2.0, (midiNoteWithOffset - 69.0) / 12.0);
+            curve[(size_t) j] = portamento.at (tMs) * 100.0; // semitone -> cents
         }
         return curve;
     }
