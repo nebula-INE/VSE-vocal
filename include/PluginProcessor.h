@@ -75,8 +75,10 @@ private:
 
     // pushNote/pushSongNote の共通部分（VCV解決 + streaming_render_push_note呼び出し）。
     // pitchCurveHz は呼び出し側で組み立て済みのカーブをそのまま使う
-    // (MIDI経由は一定ピッチのフラットカーブ、UST経由はポルタメント/ビブラート込み)。
-    void resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric);
+    // (MIDI経由は一定ピッチのフラットカーブ、UST経由はビブラート込みカーブ)。
+    // portamentoOffsetsCents はネイティブAPI経由で渡す別カーブ（省略可、その場合0セント）。
+    void resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric,
+                              const std::vector<double>& portamentoOffsetsCents = {});
 
     // 優先順位: 1) MIDI Lyric/Textメタイベント由来のキュー（同一ブロック内で
     // オーディオスレッドのみが読み書きするのでロック不要）
