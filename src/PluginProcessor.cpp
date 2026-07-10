@@ -130,14 +130,18 @@ void VoseAudioProcessor::pushSongNote (const ScheduledSongNote& note)
     constexpr int kRes = 128;
     const double durationMs = note.durationSec * 1000.0;
 
-    // PBS/PBW/PBY(ポルタメント) + VBR(ビブラート) を合成したピッチカーブ。
-    auto curve = vose_pitch::buildPitchCurveHz (note.noteNum, durationMs,
-                                                 note.pbs, note.pbw, note.pby,
-                                                 note.vibrato, kRes);
-    resolveAndPushNote (curve, note.lyric);
+    // ビブラートはここで焼き込む（ネイティブ側は簡易モデルでUSTのVBRを
+    // 再現できず、かつVoseStreamNoteにはそもそも経路が無いため）。
+    auto pitchCurve = vose_pitch::buildVibratoPitchCurveHz (note.noteNum, durationMs, note.vibrato, kRes);
+
+    // ポルタメントはネイティブの portamento_offsets 経由で渡す（忠実度の劣化なし）。
+    auto portamentoCents = vose_pitch::buildPortamentoCentsCurve (note.pbs, note.pbw, note.pby, durationMs, kRes);
+
+    resolveAndPushNote (pitchCurve, note.lyric, portamentoCents);
 }
 
-void VoseAudioProcessor::resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric)
+void VoseAudioProcessor::resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric,
+                                              const std::vector<double>& portamentoOffsetsCents)
 {
     const int kRes = (int) pitchCurveHz.size();
 
@@ -164,7 +168,8 @@ void VoseAudioProcessor::resolveAndPushNote (const std::vector<double>& pitchCur
 
     // wav_path フィールドには実パスではなく oto.ini の alias（音源キー）を渡す。
     // vose_core::find_voice_ref / g_oto_db はこのキーで検索する。
-    voice.pushNote (nextNoteId++, aliasToUse, pitchCurveHz, genderCurve, tensionCurve, breathCurve);
+    voice.pushNote (nextNoteId++, aliasToUse, pitchCurveHz, genderCurve, tensionCurve, breathCurve,
+                     portamentoOffsetsCents);
 
     prevLyric = lyric; // 次ノートのVCV解決用（VcvResolver.resolve()のprev_lyric更新と同じ）
 }
