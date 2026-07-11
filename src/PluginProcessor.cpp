@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <algorithm>
 
 VoseAudioProcessor::VoseAudioProcessor()
     : juce::AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
@@ -201,6 +202,7 @@ bool VoseAudioProcessor::loadUstFile (const juce::File& ustFile)
     }
 
     songNotes = UstParser::toScheduledNotes (project);
+    songTempo = project.tempo; // [フェーズ3] ピアノロールのグリッド表示用に保持
     songNoteCursor = 0;
     songPositionSec = 0.0;
     songPlaying = false;
@@ -221,6 +223,25 @@ void VoseAudioProcessor::startSongPlayback()
 void VoseAudioProcessor::stopSongPlayback()
 {
     songPlaying = false;
+}
+
+// [フェーズ3] ピアノロールでの編集結果をプロセッサに反映する。
+// songNotes は再生中のオーディオスレッドから読まれるため、書き換え前に
+// 必ず停止する（PluginProcessor.h のコメント参照：ロックフリー設計の前提を
+// 崩さないための単純な対策。真にリアルタイムな編集反映が必要になったら
+// ダブルバッファ化を検討する）。
+void VoseAudioProcessor::setSongNotesFromEditor (std::vector<ScheduledSongNote> newNotes, double tempo)
+{
+    stopSongPlayback();
+
+    std::sort (newNotes.begin(), newNotes.end(),
+               [] (const ScheduledSongNote& a, const ScheduledSongNote& b)
+               { return a.startTimeSec < b.startTimeSec; });
+
+    songNotes = std::move (newNotes);
+    songTempo = juce::jmax (1.0, tempo);
+    songNoteCursor = 0;
+    songPositionSec = 0.0;
 }
 
 void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -259,7 +280,8 @@ void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     // ---- UST曲スケジューラ: ホストトランスポート非同期の簡易内部クロック ----
     // このブロックが表す時間窓 [songPositionSec, songPositionSec+blockDurationSec)
     // に開始時刻が入るノートを全部トリガーする。songNotesは開始時刻順に
-    // 並んでいる前提（UstParser::toScheduledNotesが単調増加で構築するため保証される）。
+    // 並んでいる前提（UstParser::toScheduledNotesおよび
+    // VoseAudioProcessor::setSongNotesFromEditorが単調増加で構築するため保証される）。
     if (songPlaying)
     {
         const double blockDurationSec = (double) buffer.getNumSamples() / currentSampleRate;
