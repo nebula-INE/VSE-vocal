@@ -1,3 +1,5 @@
+//vose_core.cpp
+
 // --- clamp polyfill (for C++14/macOS libc++) ---
 #ifndef HAVE_STD_CLAMP
 template <typename T>
@@ -5,7 +7,7 @@ constexpr const T& clamp(const T& v, const T& lo, const T& hi) {
     return (v < lo) ? lo : (hi < v) ? hi : v;
 }
 #endif
-//vose_core.cpp
+
 
 #include <vector>
 #include <string>
