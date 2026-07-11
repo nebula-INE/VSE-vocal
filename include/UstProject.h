@@ -75,6 +75,7 @@ struct ScheduledSongNote
     int    noteNum = 60;
     juce::String lyric;
     double velocity01 = 1.0;       // intensity(0-200) を 0-1 に正規化したもの
+    juce::String flags;            // 例: "g-5B50"。UstFlags.h でパースする
 
     // ポルタメント/ビブラート用の生データ。カーブそのものは
     // PitchCurveBuilder.h（呼び出し側）が組み立てる。
