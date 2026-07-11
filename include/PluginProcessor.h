@@ -11,6 +11,7 @@
 #include "OtoDatabase.h"
 #include "VowelClassifier.h"
 #include "UstParser.h"
+#include "UstFlags.h"
 #include "PitchCurveBuilder.h"
 #include <deque>
 
@@ -74,10 +75,14 @@ private:
     void pushSongNote (const ScheduledSongNote& note);
 
     // pushNote/pushSongNote の共通部分（VCV解決 + streaming_render_push_note呼び出し）。
-    // pitchCurveHz は呼び出し側で組み立て済みのカーブをそのまま使う
-    // (MIDI経由は一定ピッチのフラットカーブ、UST経由はビブラート込みカーブ)。
+    // pitchCurveHz / genderCurve / tensionCurve / breathCurve は呼び出し側で
+    // 組み立て済みのカーブをそのまま使う。
+    // (MIDI経由は常にAPVTSのグローバル値、UST経由はFlags上書きがあればそちら優先)
     // portamentoOffsetsCents はネイティブAPI経由で渡す別カーブ（省略可、その場合0セント）。
     void resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric,
+                              const std::vector<double>& genderCurve,
+                              const std::vector<double>& tensionCurve,
+                              const std::vector<double>& breathCurve,
                               const std::vector<double>& portamentoOffsetsCents = {});
 
     // 優先順位: 1) MIDI Lyric/Textメタイベント由来のキュー（同一ブロック内で
