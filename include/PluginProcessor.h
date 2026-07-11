@@ -2,6 +2,13 @@
 // フェーズ1 PoC v2: MIDIノートオンで StreamingVoice::pushNote、
 // processBlock で StreamingVoice::pull を直接呼ぶ「本物のリアルタイム再生」版。
 // (旧v1のオフラインバウンス方式は RenderEngine.h に残置、書き出し機能用に転用予定)
+//
+// [フェーズ3 差分] ピアノロール編集用に以下を追加:
+//   - songTempo メンバ（UST読み込み時にプロジェクトのテンポを保持。ピアノロールの
+//     グリッド表示や新規ノートのデフォルト長に使う）
+//   - getSongNotesSnapshot() / setSongNotesFromEditor() / getSongTempo() /
+//     getSongPositionSeconds() の4メソッド
+// 既存のMIDI経由の再生パス（pushNote等）やUST読み込みパスは変更していない。
 
 #pragma once
 
@@ -63,6 +70,29 @@ public:
     bool isSongPlaying() const { return songPlaying; }
     int  getLoadedSongNoteCount() const { return (int) songNotes.size(); }
 
+    // --- [フェーズ3] ピアノロール編集用アクセサ ---
+    //
+    // songNotes は現状「UST読み込み時にmessage threadが書き込み、再生中は
+    // オーディオスレッドが読むだけ」という前提でロック無しに設計されている
+    // （既存コードのlyricSequence用SpinLockコメント参照）。ピアノロールからの
+    // 編集も同じ前提を踏襲し、setSongNotesFromEditor() は書き込み前に必ず
+    // 再生を停止することでレースコンディションを避ける。リアルタイムに
+    // 再生しながら編集を反映したい場合は、songNotes自体をSpinLock/ダブル
+    // バッファ化するなどの改善が別途必要（TODO、フェーズ3スコープ外）。
+
+    // 現在のノート一覧のスナップショットを返す（エディタ表示・PianoRollComponentへの
+    // 初期値供給用）。呼び出しは message thread から想定。
+    std::vector<ScheduledSongNote> getSongNotesSnapshot() const { return songNotes; }
+
+    // ピアノロールでの編集結果を反映する。startTimeSec昇順である必要はない
+    // （呼び出し側でソート済みでなくても内部でソートする）。
+    void setSongNotesFromEditor (std::vector<ScheduledSongNote> newNotes, double tempo);
+
+    double getSongTempo() const { return songTempo; }
+
+    // 再生ヘッド表示用。曲頭からの経過秒数（非再生中は最後の位置を保持）。
+    double getSongPositionSeconds() const { return songPositionSec; }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -110,6 +140,7 @@ private:
     // サンプル数から自前で経過時間を積算する。ホストのトランスポートには
     // 同期しないシンプルな内部クロック方式。TODO: AudioPlayHead同期） ---
     std::vector<ScheduledSongNote> songNotes;
+    double songTempo = 120.0; // [フェーズ3] UST読み込み時のテンポ。ピアノロールのグリッドに使う。
     size_t songNoteCursor = 0;
     bool   songPlaying = false;
     double songPositionSec = 0.0;
