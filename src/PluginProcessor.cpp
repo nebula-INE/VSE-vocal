@@ -122,7 +122,12 @@ void VoseAudioProcessor::pushNote (int midiNoteNumber)
     const double hz = 440.0 * std::pow (2.0, (midiNoteNumber - 69) / 12.0);
     std::vector<double> flatCurve (kRes, hz); // ライブMIDIにはポルタメント/ビブラート情報が無いので一定ピッチ
 
-    resolveAndPushNote (flatCurve, consumeNextLyric());
+    // MIDI経由には per-note Flags 相当の情報源が無いので、常にAPVTSのグローバル値を使う。
+    std::vector<double> genderCurve (kRes, (double) apvts.getRawParameterValue ("gender")->load());
+    std::vector<double> tensionCurve (kRes, (double) apvts.getRawParameterValue ("tension")->load());
+    std::vector<double> breathCurve (kRes, (double) apvts.getRawParameterValue ("breath")->load());
+
+    resolveAndPushNote (flatCurve, consumeNextLyric(), genderCurve, tensionCurve, breathCurve);
 }
 
 void VoseAudioProcessor::pushSongNote (const ScheduledSongNote& note)
@@ -137,14 +142,27 @@ void VoseAudioProcessor::pushSongNote (const ScheduledSongNote& note)
     // ポルタメントはネイティブの portamento_offsets 経由で渡す（忠実度の劣化なし）。
     auto portamentoCents = vose_pitch::buildPortamentoCentsCurve (note.pbs, note.pbw, note.pby, durationMs, kRes);
 
-    resolveAndPushNote (pitchCurve, note.lyric, portamentoCents);
+    // UST の Flags（例: "g-5B50"）でノート単位の上書きがあればそちらを優先し、
+    // 無ければAPVTSのグローバル値にフォールバックする。
+    const auto flagOverrides = parseUstFlags (note.flags);
+
+    const double genderVal  = flagOverrides.gender01.value_or  ((double) apvts.getRawParameterValue ("gender")->load());
+    const double tensionVal = flagOverrides.tension01.value_or ((double) apvts.getRawParameterValue ("tension")->load());
+    const double breathVal  = flagOverrides.breath01.value_or  ((double) apvts.getRawParameterValue ("breath")->load());
+
+    std::vector<double> genderCurve (kRes, genderVal);
+    std::vector<double> tensionCurve (kRes, tensionVal);
+    std::vector<double> breathCurve (kRes, breathVal);
+
+    resolveAndPushNote (pitchCurve, note.lyric, genderCurve, tensionCurve, breathCurve, portamentoCents);
 }
 
 void VoseAudioProcessor::resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric,
+                                              const std::vector<double>& genderCurve,
+                                              const std::vector<double>& tensionCurve,
+                                              const std::vector<double>& breathCurve,
                                               const std::vector<double>& portamentoOffsetsCents)
 {
-    const int kRes = (int) pitchCurveHz.size();
-
     // vcv_resolver.py の VcvResolver.resolve_note() と同じ手順:
     //   1. 音源にVCVエイリアスが存在する場合のみ、前ノートの歌詞から末尾母音を判定
     //   2. resolveAlias(lyric, prevVowel) で VCV→CV→単独音→部分一致 の順に解決
@@ -161,10 +179,6 @@ void VoseAudioProcessor::resolveAndPushNote (const std::vector<double>& pitchCur
     }
 
     const juce::String aliasToUse = (entry != nullptr) ? entry->alias : lyric;
-
-    std::vector<double> genderCurve (kRes, (double) apvts.getRawParameterValue ("gender")->load());
-    std::vector<double> tensionCurve (kRes, (double) apvts.getRawParameterValue ("tension")->load());
-    std::vector<double> breathCurve (kRes, (double) apvts.getRawParameterValue ("breath")->load());
 
     // wav_path フィールドには実パスではなく oto.ini の alias（音源キー）を渡す。
     // vose_core::find_voice_ref / g_oto_db はこのキーで検索する。
