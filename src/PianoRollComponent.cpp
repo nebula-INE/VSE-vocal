@@ -132,14 +132,17 @@ void PianoRollComponent::notifyChanged()
 void PianoRollComponent::paint (juce::Graphics& g)
 {
     const auto bounds = getLocalBounds();
-    g.fillAll (juce::Colour (0xff1e1e24));
+    auto& lf = getLookAndFeel();
+    g.fillAll (lf.findColour (VoseColourIds::canvasBackground));
 
     // --- 行の背景（黒鍵の行を少し暗く塗って読みやすくする） ---
+    const auto baseBg = lf.findColour (VoseColourIds::canvasBackground);
+    const auto altBg  = lf.findColour (VoseColourIds::canvasRowAlt);
     for (int n = kLowestNote; n <= kHighestNote; ++n)
     {
         const float y = noteNumberToY (n);
         juce::Rectangle<float> row ((float) kKeyboardWidth, y, (float) (bounds.getWidth() - kKeyboardWidth), (float) pixelsPerRow);
-        g.setColour (isBlackKeyPitchClass (n) ? juce::Colour (0xff26262e) : juce::Colour (0xff2c2c34));
+        g.setColour (isBlackKeyPitchClass (n) ? altBg : baseBg.brighter (0.03f));
         g.fillRect (row);
     }
 
@@ -154,8 +157,9 @@ void PianoRollComponent::paint (juce::Graphics& g)
         const int beatIndex = subdivisionIndex / snapDivisionsPerBeat;
         const bool isMeasure = isBeat && (beatIndex % 4 == 0);
 
-        g.setColour (isMeasure ? juce::Colour (0xff55555f)
-                                : (isBeat ? juce::Colour (0xff3d3d46) : juce::Colour (0xff2a2a30)));
+        g.setColour (isMeasure ? lf.findColour (VoseColourIds::canvasGridMeasure)
+                                : (isBeat ? lf.findColour (VoseColourIds::canvasGridBeat)
+                                          : lf.findColour (VoseColourIds::canvasGrid)));
         g.drawVerticalLine ((int) x, (float) kRulerHeight, (float) bounds.getHeight());
     }
 
@@ -165,11 +169,13 @@ void PianoRollComponent::paint (juce::Graphics& g)
         juce::Rectangle<float> loopRect (timeSecToX (loopStartSec), (float) kRulerHeight,
                                           timeSecToX (loopEndSec) - timeSecToX (loopStartSec),
                                           (float) (bounds.getHeight() - kRulerHeight));
-        g.setColour (juce::Colour (0x334fc3f7));
+        g.setColour (lf.findColour (VoseColourIds::accentPrimary).withAlpha (0.2f));
         g.fillRect (loopRect);
     }
 
     // --- ノート ---
+    const auto noteColour = lf.findColour (VoseColourIds::accentPrimary);
+    const auto noteSelectedColour = lf.findColour (VoseColourIds::noteSelected);
     for (auto& n : notes)
     {
         juce::Rectangle<float> r (timeSecToX (n.startTimeSec), noteNumberToY (n.noteNum),
@@ -177,7 +183,7 @@ void PianoRollComponent::paint (juce::Graphics& g)
                                    (float) pixelsPerRow);
         r.reduce (0.5f, 1.0f);
 
-        g.setColour (n.selected ? juce::Colour (0xffffb74d) : juce::Colour (0xff4fc3f7));
+        g.setColour (n.selected ? noteSelectedColour : noteColour);
         g.fillRoundedRectangle (r, 2.0f);
         g.setColour (juce::Colours::black.withAlpha (0.6f));
         g.drawRoundedRectangle (r, 2.0f, 1.0f);
@@ -193,34 +199,37 @@ void PianoRollComponent::paint (juce::Graphics& g)
     // --- ラバーバンド選択矩形 ---
     if (dragMode == DragMode::rubberBand && ! rubberBandRect.isEmpty())
     {
-        g.setColour (juce::Colour (0x5546c3f7));
+        const auto accent = lf.findColour (VoseColourIds::accentPrimary);
+        g.setColour (accent.withAlpha (0.3f));
         g.fillRect (rubberBandRect);
-        g.setColour (juce::Colour (0xff4fc3f7));
+        g.setColour (accent);
         g.drawRect (rubberBandRect, 1.0f);
     }
 
     // --- 鍵盤サイドバー（スクロール内容と一体化した簡易版。上部コメント参照） ---
-    g.setColour (juce::Colour (0xff17171c));
+    g.setColour (lf.findColour (VoseColourIds::canvasHeaderBackground));
     g.fillRect (0, kRulerHeight, kKeyboardWidth, bounds.getHeight() - kRulerHeight);
+    const auto keyWhite = lf.findColour (VoseColourIds::keyboardWhite);
+    const auto keyBlack = lf.findColour (VoseColourIds::keyboardBlack);
     for (int n = kLowestNote; n <= kHighestNote; ++n)
     {
         const float y = noteNumberToY (n);
         juce::Rectangle<float> key (0.0f, y, (float) kKeyboardWidth, (float) pixelsPerRow);
-        g.setColour (isBlackKeyPitchClass (n) ? juce::Colour (0xff0c0c10) : juce::Colour (0xffe8e8ec));
+        g.setColour (isBlackKeyPitchClass (n) ? keyBlack : keyWhite);
         g.fillRect (key.reduced (0.0f, 0.5f));
 
         if (pixelsPerRow >= 11.0 && (n % 12) == 0) // C音だけラベルを出す（詰まりすぎ防止）
         {
-            g.setColour (isBlackKeyPitchClass (n) ? juce::Colours::white : juce::Colours::black);
+            g.setColour (isBlackKeyPitchClass (n) ? keyWhite : keyBlack);
             g.setFont (juce::jmin (10.0f, (float) pixelsPerRow - 3.0f));
             g.drawFittedText (noteNameFor (n), key.toNearestInt(), juce::Justification::centredLeft, 1);
         }
     }
 
     // --- 上部ルーラー ---
-    g.setColour (juce::Colour (0xff17171c));
+    g.setColour (lf.findColour (VoseColourIds::canvasHeaderBackground));
     g.fillRect (0, 0, bounds.getWidth(), kRulerHeight);
-    g.setColour (juce::Colour (0xff9a9aa5));
+    g.setColour (lf.findColour (VoseColourIds::canvasGridMeasure).withAlpha (0.9f));
     g.setFont (11.0f);
     for (double t = 0.0, beat = 0.0; t <= totalSec; t += secondsPerBeat(), beat += 1.0)
     {
