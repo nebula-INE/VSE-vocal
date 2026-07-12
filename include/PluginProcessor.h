@@ -20,6 +20,7 @@
 #include "UstParser.h"
 #include "UstFlags.h"
 #include "PitchCurveBuilder.h"
+#include "AutomationCurves.h"
 #include <deque>
 
 class VoseAudioProcessor : public juce::AudioProcessor
@@ -93,6 +94,14 @@ public:
     // 再生ヘッド表示用。曲頭からの経過秒数（非再生中は最後の位置を保持）。
     double getSongPositionSeconds() const { return songPositionSec; }
 
+    // --- [フェーズ3] グラフエディタ（Pitch/Gender/Tension/Breathオートメーション） ---
+    // songNotesと同様、message threadからの書き込み・オーディオスレッドからの
+    // 読み込みというロックフリー前提。setAutomationFromEditor()はいつ呼んでも
+    // 安全（単純なメンバ代入のみで、再生中のノートスケジューリングには
+    // 影響しない。次にpushSongNote()が呼ばれた時点から新しいカーブが反映される）。
+    AutomationCurves getAutomationSnapshot() const { return automation; }
+    void setAutomationFromEditor (AutomationCurves newCurves) { automation = std::move (newCurves); }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -141,6 +150,7 @@ private:
     // 同期しないシンプルな内部クロック方式。TODO: AudioPlayHead同期） ---
     std::vector<ScheduledSongNote> songNotes;
     double songTempo = 120.0; // [フェーズ3] UST読み込み時のテンポ。ピアノロールのグリッドに使う。
+    AutomationCurves automation; // [フェーズ3] グラフエディタで編集するPitch/Gender/Tension/Breathカーブ
     size_t songNoteCursor = 0;
     bool   songPlaying = false;
     double songPositionSec = 0.0;
