@@ -38,6 +38,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "PianoRollNote.h"
+#include "VoseColourIds.h"
 #include <vector>
 #include <functional>
 #include <memory>
