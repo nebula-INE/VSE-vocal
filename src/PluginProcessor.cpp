@@ -155,6 +155,38 @@ void VoseAudioProcessor::pushSongNote (const ScheduledSongNote& note)
     std::vector<double> tensionCurve (kRes, tensionVal);
     std::vector<double> breathCurve (kRes, breathVal);
 
+    // [フェーズ3] グラフエディタで打ち込んだPitch/Gender/Tension/Breathオートメーションが
+    // あれば、ノート単位の固定値（Flags/APVTS）よりもこちらを優先してサンプリングする。
+    // 曲頭からの絶対時刻(note.startTimeSec起点)でサンプリングするため、UST/ピアノロールの
+    // 時間軸とグラフエディタの時間軸は同じ「曲頭からの秒数」で揃っている前提。
+    const int denom = juce::jmax (1, kRes - 1);
+    const bool hasGender  = automation.hasPoints (AutomationParam::gender);
+    const bool hasTension = automation.hasPoints (AutomationParam::tension);
+    const bool hasBreath  = automation.hasPoints (AutomationParam::breath);
+    const bool hasPitch   = automation.hasPoints (AutomationParam::pitch);
+
+    if (hasGender || hasTension || hasBreath || hasPitch)
+    {
+        for (int j = 0; j < kRes; ++j)
+        {
+            const double tAbsSec = note.startTimeSec + (note.durationSec * ((double) j / (double) denom));
+
+            if (hasGender)
+                genderCurve[(size_t) j] = *automation.evaluate (AutomationParam::gender, tAbsSec);
+            if (hasTension)
+                tensionCurve[(size_t) j] = *automation.evaluate (AutomationParam::tension, tAbsSec);
+            if (hasBreath)
+                breathCurve[(size_t) j] = *automation.evaluate (AutomationParam::breath, tAbsSec);
+
+            if (hasPitch)
+            {
+                const double semitoneOffset = AutomationRanges::pitchValueToSemitones (
+                    *automation.evaluate (AutomationParam::pitch, tAbsSec));
+                pitchCurve[(size_t) j] *= std::pow (2.0, semitoneOffset / 12.0);
+            }
+        }
+    }
+
     resolveAndPushNote (pitchCurve, note.lyric, genderCurve, tensionCurve, breathCurve, portamentoCents);
 }
 
