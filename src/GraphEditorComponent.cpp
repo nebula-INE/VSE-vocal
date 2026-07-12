@@ -145,7 +145,8 @@ void GraphEditorComponent::paint (juce::Graphics& g)
 {
     const auto bounds = getLocalBounds();
     const double h = (double) bounds.getHeight();
-    g.fillAll (juce::Colour (0xff1e1e24));
+    auto& lf = getLookAndFeel();
+    g.fillAll (lf.findColour (VoseColourIds::canvasBackground));
 
     // --- 拍/小節グリッド（ピアノロールと視覚的に揃えるため同じテンポを使う） ---
     const double secPerBeat = 60.0 / tempoBpm;
@@ -154,14 +155,15 @@ void GraphEditorComponent::paint (juce::Graphics& g)
     for (double t = 0.0; t <= totalSec; t += secPerBeat, ++beatIndex)
     {
         const float x = timeSecToX (t);
-        g.setColour ((beatIndex % 4 == 0) ? juce::Colour (0xff45454f) : juce::Colour (0xff2a2a30));
+        g.setColour ((beatIndex % 4 == 0) ? lf.findColour (VoseColourIds::canvasGridMeasure)
+                                           : lf.findColour (VoseColourIds::canvasGrid));
         g.drawVerticalLine ((int) x, 0.0f, (float) bounds.getHeight());
     }
 
     // --- Pitchモード時の中心線 ---
     if (mode == AutomationParam::pitch)
     {
-        g.setColour (juce::Colour (0xff3c3c3c));
+        g.setColour (lf.findColour (VoseColourIds::canvasGridBeat));
         float dashLengths[] = { 4.0f, 4.0f };
         juce::Line<float> centerLine (0.0f, (float) (h / 2.0), (float) bounds.getWidth(), (float) (h / 2.0));
         g.drawDashedLine (centerLine, dashLengths, 2, 1.0f);
