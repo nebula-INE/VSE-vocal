@@ -1,12 +1,11 @@
 // PluginEditor.h
 //
 // [フェーズ3 差分]
-//   - 上部にピアノロール（PianoRollComponent）
-//   - 中段にグラフエディタ（GraphEditorComponent, Pitch/Gender/Tension/Breath）
-//   - 下部に既存のデバッグ用パネル（スライダー/歌詞キュー/UST読み込みボタン等）
-// の3段構成にした。ピアノロール・グラフエディタともにUSTを読み込むと
-// その内容で初期化され、編集内容はリアルタイムでプロセッサ側に反映される
-// （PianoRollBridge.h / AutomationCurves経由）。
+//   - 上部: ピアノロール（PianoRollComponent）
+//   - 中段: グラフエディタ（GraphEditorComponent, Pitch/Gender/Tension/Breath）
+//   - その下: 音源ブラウザ（VoiceGalleryComponent, ボイスギャラリー）+ テーマ切替
+//   - 最下部: 既存のデバッグ用パネル（スライダー/歌詞キュー/UST読み込みボタン等）
+// という4段構成にした。VoseLookAndFeelでダーク/ライトのテーマ切り替えに対応。
 
 #pragma once
 
@@ -15,6 +14,8 @@
 #include "PianoRollComponent.h"
 #include "PianoRollBridge.h"
 #include "GraphEditorComponent.h"
+#include "VoiceGalleryComponent.h"
+#include "VoseLookAndFeel.h"
 #include <unordered_map>
 #include <array>
 
@@ -24,6 +25,10 @@ public:
     explicit VoseAudioProcessorEditor (VoseAudioProcessor& p)
         : juce::AudioProcessorEditor (&p), processor (p)
     {
+        // [フェーズ3] テーマ。エディタが破棄されるまでこのLookAndFeelが
+        // コンポーネントツリー全体（子コンポーネント含む）に適用される。
+        setLookAndFeel (&lookAndFeel);
+
         setupSlider (genderSlider, genderAttach, "gender");
         setupSlider (tensionSlider, tensionAttach, "tension");
         setupSlider (breathSlider, breathAttach, "breath");
@@ -48,6 +53,7 @@ public:
                 if (dir.isDirectory())
                 {
                     processor.loadVoiceDirectory (dir);
+                    voiceGallery.setSelectedByName (dir.getFileName());
                     updateStatusLabel();
                 }
             });
@@ -69,8 +75,8 @@ public:
                 if (f.existsAsFile())
                 {
                     processor.loadUstFile (f);
-                    refreshPianoRollFromProcessor();   // [フェーズ3] 読み込んだUSTをピアノロールに反映
-                    refreshGraphEditorFromProcessor(); // [フェーズ3] テンポ変更をグラフエディタにも反映
+                    refreshPianoRollFromProcessor();
+                    refreshGraphEditorFromProcessor();
                     updateStatusLabel();
                 }
             });
@@ -100,20 +106,20 @@ public:
         {
             auto& button = modeButtons[i];
             button.setButtonText (kModeNames[i]);
-            button.setRadioGroupId (0x6706); // 適当な固定値。他のRadioGroupと衝突しなければ何でも良い。
+            button.setRadioGroupId (0x6706);
             button.setClickingTogglesState (true);
             button.setColour (juce::TextButton::buttonOnColourId, colourForModeButton (kModes[i]));
             button.onClick = [this, i] { graphEditor.setMode (kModes[i]); };
             addAndMakeVisible (button);
         }
-        modeButtons[0].setToggleState (true, juce::dontSendNotification); // 初期モード = Pitch
+        modeButtons[0].setToggleState (true, juce::dontSendNotification);
 
         penModeToggle.setButtonText ("Pen");
         penModeToggle.onClick = [this] { graphEditor.setPenMode (penModeToggle.getToggleState()); };
         addAndMakeVisible (penModeToggle);
 
         graphEditorViewport.setViewedComponent (&graphEditor, false);
-        graphEditorViewport.setScrollBarsShown (false, true); // 横スクロールのみ（縦は常にビューポート一杯）
+        graphEditorViewport.setScrollBarsShown (false, true);
         addAndMakeVisible (graphEditorViewport);
 
         graphEditor.onCurvesChanged = [this] (const AutomationCurves& curves)
@@ -122,25 +128,66 @@ public:
         };
         graphEditor.setPlayheadSecondsProvider ([this] { return processor.getSongPositionSeconds(); });
 
+        // --- [フェーズ3] 音源ブラウザ（ボイスギャラリー） ---
+        rescanVoicesButton.setButtonText ("音源を再スキャン");
+        rescanVoicesButton.onClick = [this] { voiceGallery.rescan(); };
+        addAndMakeVisible (rescanVoicesButton);
+
+        themeToggleButton.setButtonText (lookAndFeel.isDarkMode() ? "Light" : "Dark");
+        themeToggleButton.onClick = [this]
+        {
+            const bool newDark = ! lookAndFeel.isDarkMode();
+            lookAndFeel.setDarkMode (newDark);
+            themeToggleButton.setButtonText (newDark ? "Light" : "Dark");
+            repaint();
+        };
+        addAndMakeVisible (themeToggleButton);
+
+        voiceGalleryViewport.setViewedComponent (&voiceGallery, false);
+        voiceGalleryViewport.setScrollBarsShown (false, true);
+        addAndMakeVisible (voiceGalleryViewport);
+
+        voiceGallery.onVoiceSelected = [this] (const VoiceInfo& info)
+        {
+            if (info.isEmbedded)
+            {
+                // TODO: コアDLLへの内蔵音源登録(register_all_embedded_voices)呼び出しが
+                // PluginProcessor側にまだ配線されていない。ビルドパイプライン側の
+                // コード生成（GeneratedVoices.h相当）と繋ぎ込む必要がある。
+                statusLabel.setText ("内蔵音源への切り替えは未実装です（TODO）",
+                                     juce::dontSendNotification);
+                return;
+            }
+            processor.loadVoiceDirectory (info.directory);
+            updateStatusLabel();
+        };
+        voiceGallery.rescan();
+
         refreshPianoRollFromProcessor();
         refreshGraphEditorFromProcessor();
 
-        setSize (900, 820);
+        setSize (900, 980);
+    }
+
+    ~VoseAudioProcessorEditor() override
+    {
+        setLookAndFeel (nullptr); // JUCEの規約: LookAndFeelを外してから破棄する
     }
 
     void paint (juce::Graphics& g) override
     {
-        g.fillAll (juce::Colours::darkslategrey);
-        g.setColour (juce::Colours::white);
-        g.drawFittedText ("VO-SE (Phase 3: Piano Roll + Graph Editor)", getLocalBounds().removeFromTop (24),
-                           juce::Justification::centred, 1);
+        g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
+        g.setColour (getLookAndFeel().findColour (juce::Label::textColourId));
+        g.drawFittedText ("VO-SE (Phase 3: Piano Roll / Graph Editor / Voice Gallery)",
+                           getLocalBounds().removeFromTop (24), juce::Justification::centred, 1);
     }
 
     void resized() override
     {
         auto area = getLocalBounds().withTrimmedTop (24);
 
-        auto pianoRollArea = area.removeFromTop (area.getHeight() - kDebugPanelHeight - kGraphEditorHeight);
+        auto pianoRollArea = area.removeFromTop (area.getHeight() - kDebugPanelHeight
+                                                  - kGraphEditorHeight - kGalleryAreaHeight);
         pianoRollViewport.setBounds (pianoRollArea.reduced (4));
 
         auto graphArea = area.removeFromTop (kGraphEditorHeight);
@@ -155,6 +202,14 @@ public:
 
         graphEditorViewport.setBounds (graphArea.reduced (4, 2));
         graphEditor.setViewHeight (graphEditorViewport.getHeight());
+
+        auto galleryArea = area.removeFromTop (kGalleryAreaHeight);
+        auto galleryToolbar = galleryArea.removeFromTop (28);
+        rescanVoicesButton.setBounds (galleryToolbar.removeFromLeft (140));
+        galleryToolbar.removeFromLeft (8);
+        themeToggleButton.setBounds (galleryToolbar.removeFromLeft (90));
+        voiceGalleryViewport.setBounds (galleryArea.reduced (4, 2));
+        voiceGallery.setSize (voiceGallery.getWidth(), voiceGalleryViewport.getHeight());
 
         auto debugArea = area.reduced (20, 8);
         genderSlider.setBounds (debugArea.removeFromTop (28));
@@ -183,6 +238,7 @@ private:
 
     static constexpr int kDebugPanelHeight = 140;
     static constexpr int kGraphEditorHeight = 200;
+    static constexpr int kGalleryAreaHeight = 138;
 
     static inline const std::array<AutomationParam, 4> kModes {
         AutomationParam::pitch, AutomationParam::gender, AutomationParam::tension, AutomationParam::breath
@@ -235,6 +291,8 @@ private:
     }
 
     VoseAudioProcessor& processor;
+    VoseLookAndFeel lookAndFeel { true }; // [フェーズ3] ダークモードで開始
+
     juce::Slider genderSlider, tensionSlider, breathSlider;
     std::unique_ptr<SliderAttachment> genderAttach, tensionAttach, breathAttach;
 
@@ -256,4 +314,10 @@ private:
     juce::ToggleButton penModeToggle;
     juce::Viewport graphEditorViewport;
     GraphEditorComponent graphEditor;
+
+    // [フェーズ3] 音源ブラウザ + テーマ切替
+    juce::TextButton rescanVoicesButton;
+    juce::TextButton themeToggleButton;
+    juce::Viewport voiceGalleryViewport;
+    VoiceGalleryComponent voiceGallery;
 };
