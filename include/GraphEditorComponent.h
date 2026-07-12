@@ -28,6 +28,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "AutomationCurves.h"
+#include "VoseColourIds.h"
 #include <functional>
 
 class GraphEditorComponent : public juce::Component,
