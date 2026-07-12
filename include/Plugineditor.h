@@ -1,10 +1,12 @@
 // PluginEditor.h
 //
-// [フェーズ3 差分] 上部にピアノロール（PianoRollComponent）を追加し、
-// 既存のデバッグ用パネル（スライダー/歌詞キュー/UST読み込みボタン等）は
-// 下部の帯に移設してそのまま残した。ピアノロールはUSTを読み込むと
-// その内容で初期化され、編集するとリアルタイムでプロセッサ側の
-// songNotes に反映される（PianoRollBridge.h経由）。
+// [フェーズ3 差分]
+//   - 上部にピアノロール（PianoRollComponent）
+//   - 中段にグラフエディタ（GraphEditorComponent, Pitch/Gender/Tension/Breath）
+//   - 下部に既存のデバッグ用パネル（スライダー/歌詞キュー/UST読み込みボタン等）
+// の3段構成にした。ピアノロール・グラフエディタともにUSTを読み込むと
+// その内容で初期化され、編集内容はリアルタイムでプロセッサ側に反映される
+// （PianoRollBridge.h / AutomationCurves経由）。
 
 #pragma once
 
@@ -12,7 +14,9 @@
 #include "PluginProcessor.h"
 #include "PianoRollComponent.h"
 #include "PianoRollBridge.h"
+#include "GraphEditorComponent.h"
 #include <unordered_map>
+#include <array>
 
 class VoseAudioProcessorEditor : public juce::AudioProcessorEditor
 {
@@ -65,7 +69,8 @@ public:
                 if (f.existsAsFile())
                 {
                     processor.loadUstFile (f);
-                    refreshPianoRollFromProcessor(); // [フェーズ3] 読み込んだUSTをピアノロールに反映
+                    refreshPianoRollFromProcessor();   // [フェーズ3] 読み込んだUSTをピアノロールに反映
+                    refreshGraphEditorFromProcessor(); // [フェーズ3] テンポ変更をグラフエディタにも反映
                     updateStatusLabel();
                 }
             });
@@ -90,16 +95,44 @@ public:
         };
         pianoRoll.setPlayheadSecondsProvider ([this] { return processor.getSongPositionSeconds(); });
 
-        refreshPianoRollFromProcessor();
+        // --- [フェーズ3] グラフエディタ ---
+        for (size_t i = 0; i < kModes.size(); ++i)
+        {
+            auto& button = modeButtons[i];
+            button.setButtonText (kModeNames[i]);
+            button.setRadioGroupId (0x6706); // 適当な固定値。他のRadioGroupと衝突しなければ何でも良い。
+            button.setClickingTogglesState (true);
+            button.setColour (juce::TextButton::buttonOnColourId, colourForModeButton (kModes[i]));
+            button.onClick = [this, i] { graphEditor.setMode (kModes[i]); };
+            addAndMakeVisible (button);
+        }
+        modeButtons[0].setToggleState (true, juce::dontSendNotification); // 初期モード = Pitch
 
-        setSize (900, 620);
+        penModeToggle.setButtonText ("Pen");
+        penModeToggle.onClick = [this] { graphEditor.setPenMode (penModeToggle.getToggleState()); };
+        addAndMakeVisible (penModeToggle);
+
+        graphEditorViewport.setViewedComponent (&graphEditor, false);
+        graphEditorViewport.setScrollBarsShown (false, true); // 横スクロールのみ（縦は常にビューポート一杯）
+        addAndMakeVisible (graphEditorViewport);
+
+        graphEditor.onCurvesChanged = [this] (const AutomationCurves& curves)
+        {
+            processor.setAutomationFromEditor (curves);
+        };
+        graphEditor.setPlayheadSecondsProvider ([this] { return processor.getSongPositionSeconds(); });
+
+        refreshPianoRollFromProcessor();
+        refreshGraphEditorFromProcessor();
+
+        setSize (900, 820);
     }
 
     void paint (juce::Graphics& g) override
     {
         g.fillAll (juce::Colours::darkslategrey);
         g.setColour (juce::Colours::white);
-        g.drawFittedText ("VO-SE (Phase 3: Piano Roll)", getLocalBounds().removeFromTop (24),
+        g.drawFittedText ("VO-SE (Phase 3: Piano Roll + Graph Editor)", getLocalBounds().removeFromTop (24),
                            juce::Justification::centred, 1);
     }
 
@@ -107,11 +140,22 @@ public:
     {
         auto area = getLocalBounds().withTrimmedTop (24);
 
-        // ピアノロールは上側の大きな領域を占有する。
-        auto pianoRollArea = area.removeFromTop (area.getHeight() - kDebugPanelHeight);
+        auto pianoRollArea = area.removeFromTop (area.getHeight() - kDebugPanelHeight - kGraphEditorHeight);
         pianoRollViewport.setBounds (pianoRollArea.reduced (4));
 
-        // 下側にデバッグパネル（既存のスライダー/歌詞キュー等）を配置。
+        auto graphArea = area.removeFromTop (kGraphEditorHeight);
+        auto graphToolbar = graphArea.removeFromTop (28);
+        for (auto& button : modeButtons)
+        {
+            button.setBounds (graphToolbar.removeFromLeft (70));
+            graphToolbar.removeFromLeft (4);
+        }
+        graphToolbar.removeFromLeft (10);
+        penModeToggle.setBounds (graphToolbar.removeFromLeft (60));
+
+        graphEditorViewport.setBounds (graphArea.reduced (4, 2));
+        graphEditor.setViewHeight (graphEditorViewport.getHeight());
+
         auto debugArea = area.reduced (20, 8);
         genderSlider.setBounds (debugArea.removeFromTop (28));
         tensionSlider.setBounds (debugArea.removeFromTop (28));
@@ -138,6 +182,24 @@ private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
 
     static constexpr int kDebugPanelHeight = 140;
+    static constexpr int kGraphEditorHeight = 200;
+
+    static inline const std::array<AutomationParam, 4> kModes {
+        AutomationParam::pitch, AutomationParam::gender, AutomationParam::tension, AutomationParam::breath
+    };
+    static inline const std::array<const char*, 4> kModeNames { "Pitch", "Gender", "Tension", "Breath" };
+
+    static juce::Colour colourForModeButton (AutomationParam p)
+    {
+        switch (p)
+        {
+            case AutomationParam::pitch:   return juce::Colour (0xff00ff7f);
+            case AutomationParam::gender:  return juce::Colour (0xffe74c3c);
+            case AutomationParam::tension: return juce::Colour (0xff2ecc71);
+            case AutomationParam::breath:  return juce::Colour (0xfff1c40f);
+        }
+        return juce::Colours::grey;
+    }
 
     void setupSlider (juce::Slider& slider, std::unique_ptr<SliderAttachment>& attach,
                        const juce::String& paramId)
@@ -157,9 +219,6 @@ private:
             juce::dontSendNotification);
     }
 
-    // [フェーズ3] プロセッサ側の songNotes からピアノロールを初期化/再同期する。
-    // UST読み込み直後や、外部（将来的なプロジェクトファイル読み込み等）から
-    // songNotesが変わったタイミングで呼ぶ。
     void refreshPianoRollFromProcessor()
     {
         auto snapshot = processor.getSongNotesSnapshot();
@@ -167,6 +226,12 @@ private:
 
         pianoRoll.setTempo (processor.getSongTempo());
         pianoRoll.setNotes (PianoRollBridge::fromScheduledSongNotes (snapshot));
+    }
+
+    void refreshGraphEditorFromProcessor()
+    {
+        graphEditor.setTempo (processor.getSongTempo());
+        graphEditor.setCurves (processor.getAutomationSnapshot());
     }
 
     VoseAudioProcessor& processor;
@@ -183,8 +248,12 @@ private:
     juce::TextButton stopButton { "停止" };
     std::unique_ptr<juce::FileChooser> ustFileChooser;
 
-    // [フェーズ3]
     juce::Viewport pianoRollViewport;
     PianoRollComponent pianoRoll;
     std::unordered_map<int64_t, ScheduledSongNote> originalNoteMap;
+
+    std::array<juce::TextButton, 4> modeButtons;
+    juce::ToggleButton penModeToggle;
+    juce::Viewport graphEditorViewport;
+    GraphEditorComponent graphEditor;
 };
