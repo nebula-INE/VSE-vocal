@@ -1,4 +1,4 @@
-// GraphEditorComponent.cpp、
+// GraphEditorComponent.cpp
 
 #include "GraphEditorComponent.h"
 #include <algorithm>
