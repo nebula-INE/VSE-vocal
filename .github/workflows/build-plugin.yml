@@ -44,24 +44,27 @@ jobs:
             libgl1-mesa-dev
 
       # --- ビルド設定 (Configure) ---
+      # -S でソースのある juce_plugin を明示し、その中に build ディレクトリを作ります
       - name: Configure CMake
         run: |
-          cmake -B build \
+          cmake -S juce_plugin -B juce_plugin/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DPROJECT_VERSION=1.0.0
 
       # --- ビルド実行 (Build) ---
+      # ビルド対象のディレクトリも juce_plugin/build に合わせます
       - name: Build Plugin
         run: |
-          cmake --build build --config Release --parallel 4
+          cmake --build juce_plugin/build --config Release --parallel 4
 
       # --- 成果物のアップロード (Artifacts) ---
+      # アップロード元パスも変更します
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: vose-plugin-${{ matrix.os }}
           path: |
-            build/**/*_artefacts/Release/VST3/
-            build/**/*_artefacts/Release/AU/
-            build/**/*_artefacts/Release/Standalone/
+            juce_plugin/build/**/*_artefacts/Release/VST3/
+            juce_plugin/build/**/*_artefacts/Release/AU/
+            juce_plugin/build/**/*_artefacts/Release/Standalone/
           if-no-files-found: warn
