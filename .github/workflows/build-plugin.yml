@@ -42,13 +42,8 @@ jobs:
             glu-dev \
             libgl1-mesa-dev
 
-      # --- CMake のセットアップ ---
-      - name: Setup CMake
-        uses: jwlawrence/actions-setup-cmake@v1
-        with:
-          cmake-version: '3.25.x'
-
       # --- ビルド設定 (Configure) ---
+      # プリインストールされている cmake が自動で使用されます
       - name: Configure CMake
         run: |
           cmake -B build \
