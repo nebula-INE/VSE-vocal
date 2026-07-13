@@ -47,7 +47,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(JUCE)
 
-set(VOSE_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(VOSE_REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
 # --- ビルドフォーマット: VST3 + Standalone を全OS共通、AUはmacOSのみ追加 ---
 set(VOSE_PLUGIN_FORMATS VST3 Standalone)
