@@ -57,6 +57,17 @@ juce_add_plugin(VoseVocal
     COPY_PLUGIN_AFTER_BUILD   FALSE
 )
 
+
+# iconv ライブラリを検索する
+find_library(ICONV_LIBRARY NAMES iconv)
+
+# ターゲット（VoseVocalの共有コードターゲット）にリンクさせる
+if(ICONV_LIBRARY)
+    target_link_libraries(VoseVocal PRIVATE ${ICONV_LIBRARY})
+else()
+    # 念のため、見つからなかった場合は直にフラグとして渡すフォールバック
+    target_link_libraries(VoseVocal PRIVATE "-liconv")
+endif()
 # ========================
 # ソースファイル定義
 # ========================
