@@ -33,9 +33,10 @@ public:
 
         for (int i = lyric.length() - 1; i >= 0; --i)
         {
-            const juce_wchar ch = lyric[i];
+            // 名前空間を明示
+            const juce::juce_wchar ch = lyric[i];
 
-            if (ch == (juce_wchar) 0x3063 || ch == (juce_wchar) 0x30C3) // っ / ッ
+            if (ch == (juce::juce_wchar) 0x3063 || ch == (juce::juce_wchar) 0x30C3) // っ / ッ
                 continue;
 
             const auto it = vowelMap.find (ch);
@@ -48,9 +49,11 @@ public:
     }
 
 private:
-    void addGroup (const char* utf8Chars, const char* label)
+    // C++20対策：第一引数の型を const char8_t* に変更
+    void addGroup (const char8_t* utf8Chars, const char* label)
     {
-        const auto s = juce::String::fromUTF8 (utf8Chars);
+        // reinterpret_cast を噛ませて juce::String::fromUTF8 に安全に渡す
+        const auto s = juce::String::fromUTF8 (reinterpret_cast<const char*>(utf8Chars));
         for (auto ch : s)
             vowelMap[ch] = label;
     }
@@ -71,5 +74,6 @@ private:
         addGroup (u8"んン", "n");
     }
 
-    std::map<juce_wchar, juce::String> vowelMap;
+    // 名前空間を明示
+    std::map<juce::juce_wchar, juce::String> vowelMap;
 };
