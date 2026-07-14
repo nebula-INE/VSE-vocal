@@ -27,8 +27,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libjack-jackd2-dev ladspa-sdk libcurl4-openssl-dev libfreetype6-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libwebkit2gtk-4.0-dev glu-dev libgl1-mesa-dev
-
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev ladspa-sdk libcurl4-openssl-dev libfreetype6-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libwebkit2gtk-4.1-dev libglu1-mesa-dev libgl1-mesa-dev
       # --- ビルド設定 (Configure) ---
       # 存在しない juce_plugin パスを排除し、ルートを起点に1行で処理します
       - name: Configure CMake
