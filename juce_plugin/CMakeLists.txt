@@ -67,7 +67,7 @@ juce_add_plugin(VoseVocal
 # ========================
 # 必須ファイル: PluginProcessor, PluginEditor, UIコンポーネント
 # オプション: OtoDatabase, UstParser, VowelClassifier, StreamingVoice, 
-#            PitchCurveBuilder, VoseBridge の .cpp（存在時のみ有効化）
+#             PitchCurveBuilder, VoseBridge の .cpp（存在時のみ有効化）
 
 target_sources(VoseVocal
     PRIVATE
@@ -153,6 +153,13 @@ target_link_libraries(VoseVocal
         juce::juce_recommended_lto_flags      # Link-Time Optimization
         juce::juce_recommended_warning_flags
 )
+
+# ========================
+# macOS 用追加リンク（重要：vose_text::decodeAutoEncodingのエラー回避用）
+# ========================
+if(APPLE)
+    target_link_libraries(VoseVocal PRIVATE iconv)
+endif()
 
 # ========================
 # オプション設定（デバッグ出力）
