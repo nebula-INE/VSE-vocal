@@ -39,7 +39,8 @@ inline UstFlagOverrides parseUstFlags (const juce::String& flags)
     const int n = flags.length();
     while (i < n)
     {
-        const juce_wchar letter = flags[i];
+        // 名前空間 juce:: を明示的に追加して解決
+        const juce::juce_wchar letter = flags[i];
         if (! juce::CharacterFunctions::isLetter (letter))
         {
             ++i; // 不明な区切り文字はスキップ
