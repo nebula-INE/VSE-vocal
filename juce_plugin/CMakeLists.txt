@@ -1,6 +1,6 @@
 # juce_plugin/CMakeLists.txt
 #
-# VO-SE vocal JUCE Plugin ビルド設定（修正版）
+# VO-SE vocal JUCE Plugin ビルド設定（完全修正版）
 #
 # ビルド方法:
 #   cmake -B juce_plugin/build -S juce_plugin -DCMAKE_BUILD_TYPE=Release
@@ -39,6 +39,14 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(JUCE)
 
 # ========================
+# macOS 用の外部ライブラリ検出
+# ========================
+if(APPLE)
+    # LTO最適化時にも確実に libiconv.dylib を解決するための標準パッケージ検出
+    find_package(Iconv REQUIRED)
+endif()
+
+# ========================
 # プラグインフォーマット定義
 # ========================
 # 全プラットフォーム: VST3, Standalone
@@ -65,7 +73,7 @@ juce_add_plugin(VoseVocal
 # ========================
 # ソースファイル定義
 # ========================
-# 必須ファイル: PluginProcessor, PluginEditor, UIコンポーネント
+# 必須ファイル: PluginProcessor, PluginEditor, UIコンポーネ項
 # オプション: OtoDatabase, UstParser, VowelClassifier, StreamingVoice, 
 #             PitchCurveBuilder, VoseBridge の .cpp（存在時のみ有効化）
 
@@ -116,23 +124,13 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # ========================
-# macOS 用追加リンク（LTO有効時も確実にシンボルを通す設定）
+# macOS 固有設定
 # ========================
 if(APPLE)
-    # 共有コード、および生成される全バイナリターゲットに確実に iconv を通す
-    target_link_libraries(VoseVocal_SharedCode PRIVATE iconv)
-    target_link_libraries(VoseVocal PRIVATE iconv)
-    
-    # さらに、JUCEが裏で生成するフォーマット別ターゲット（もし存在すれば）に波及させる
-    if(TARGET VoseVocal_VST3)
-        target_link_libraries(VoseVocal_VST3 PRIVATE iconv)
-    endif()
-    if(TARGET VoseVocal_AU)
-        target_link_libraries(VoseVocal_AU PRIVATE iconv)
-    endif()
-    if(TARGET VoseVocal_Standalone)
-        target_link_libraries(VoseVocal_Standalone PRIVATE iconv)
-    endif()
+    # 最小動作OSバージョン設定（有効化する場合はコメントアウト `#` を外してください）
+    # set_target_properties(VoseVocal_SharedCode PROPERTIES
+    #     MACOSX_DEPLOYMENT_TARGET 11.0
+    # )
 endif()
 
 # ========================
@@ -165,10 +163,23 @@ target_link_libraries(VoseVocal
 )
 
 # ========================
-# macOS 用追加リンク（重要：vose_text::decodeAutoEncodingのエラー回避用）
+# macOS 用追加リンク（システム iconv を確実に結合する）
 # ========================
 if(APPLE)
-    target_link_libraries(VoseVocal PRIVATE iconv)
+    # 共有スタティックライブラリ、およびメインのメタターゲットにリンク
+    target_link_libraries(VoseVocal_SharedCode PRIVATE Iconv::Iconv)
+    target_link_libraries(VoseVocal PRIVATE Iconv::Iconv)
+    
+    # LTO最適化によるリンク漏れを防ぐため、各出力ターゲットに個別に直接リンクを波及させる
+    if(TARGET VoseVocal_VST3)
+        target_link_libraries(VoseVocal_VST3 PRIVATE Iconv::Iconv)
+    endif()
+    if(TARGET VoseVocal_AU)
+        target_link_libraries(VoseVocal_AU PRIVATE Iconv::Iconv)
+    endif()
+    if(TARGET VoseVocal_Standalone)
+        target_link_libraries(VoseVocal_Standalone PRIVATE Iconv::Iconv)
+    endif()
 endif()
 
 # ========================
