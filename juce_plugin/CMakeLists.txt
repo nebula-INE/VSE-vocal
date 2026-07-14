@@ -116,13 +116,23 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # ========================
-# macOS 固有設定
+# macOS 用追加リンク（LTO有効時も確実にシンボルを通す設定）
 # ========================
 if(APPLE)
-    # 最小デプロイメントバージョン設定（オプション）
-    set_target_properties(VoseVocal PROPERTIES
-    MACOSX_DEPLOYMENT_TARGET 11.0
-    )
+    # 共有コード、および生成される全バイナリターゲットに確実に iconv を通す
+    target_link_libraries(VoseVocal_SharedCode PRIVATE iconv)
+    target_link_libraries(VoseVocal PRIVATE iconv)
+    
+    # さらに、JUCEが裏で生成するフォーマット別ターゲット（もし存在すれば）に波及させる
+    if(TARGET VoseVocal_VST3)
+        target_link_libraries(VoseVocal_VST3 PRIVATE iconv)
+    endif()
+    if(TARGET VoseVocal_AU)
+        target_link_libraries(VoseVocal_AU PRIVATE iconv)
+    endif()
+    if(TARGET VoseVocal_Standalone)
+        target_link_libraries(VoseVocal_Standalone PRIVATE iconv)
+    endif()
 endif()
 
 # ========================
