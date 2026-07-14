@@ -1,16 +1,8 @@
+# ==============================================================================
 # juce_plugin/CMakeLists.txt
 #
-# VO-SE vocal JUCE Plugin ビルド設定（完全修正版）
-#
-# ビルド方法:
-#   cmake -B juce_plugin/build -S juce_plugin -DCMAKE_BUILD_TYPE=Release
-#   cmake --build juce_plugin/build --config Release --parallel
-#
-# トラブルシューティング:
-#   1. PluginEditor.h のファイル名確認（小文字e ではなく大文字E）
-#   2. include/ の全 .h ファイルが存在することを確認
-#   3. src/ の全対応 .cpp ファイルが存在することを確認
-#   4. 不要な .cpp はコメントアウトしている箇所で管理
+# VO-SE vocal JUCE Plugin ビルド設定（完全自動・最適化版）
+# ==============================================================================
 
 cmake_minimum_required(VERSION 3.22)
 
@@ -19,7 +11,7 @@ project(VoseVocalPlugin VERSION 0.1.0 LANGUAGES CXX)
 # ========================
 # C++ 標準設定
 # ========================
-# vose_core のC++20対応と合わせるため、ここでもC++20を指定
+# vose_core のC++20対応と同期
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -27,8 +19,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # ========================
 # JUCE フレームワークの取得
 # ========================
-# GitHub Actions の release.yml で `juce_plugin/build/_deps` をキャッシュしているため、
-# 初回以降はFetchContentが高速化される。
 include(FetchContent)
 FetchContent_Declare(
     JUCE
@@ -39,18 +29,15 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(JUCE)
 
 # ========================
-# macOS 用の外部ライブラリ検出
+# 外部ライブラリ検出 (macOS 用 iconv)
 # ========================
 if(APPLE)
-    # LTO最適化時にも確実に libiconv.dylib を解決するための標準パッケージ検出
     find_package(Iconv REQUIRED)
 endif()
 
 # ========================
 # プラグインフォーマット定義
 # ========================
-# 全プラットフォーム: VST3, Standalone
-# macOS のみ追加: AU
 set(VOSE_PLUGIN_FORMATS VST3 Standalone)
 if(APPLE)
     list(APPEND VOSE_PLUGIN_FORMATS AU)
@@ -73,26 +60,32 @@ juce_add_plugin(VoseVocal
 # ========================
 # ソースファイル定義
 # ========================
-# 必須ファイル: PluginProcessor, PluginEditor, UIコンポーネ項
-# オプション: OtoDatabase, UstParser, VowelClassifier, StreamingVoice, 
-#             PitchCurveBuilder, VoseBridge の .cpp（存在時のみ有効化）
-
+# 1. 必須の基本フレームワーク/UIソース
 target_sources(VoseVocal
     PRIVATE
-        # === 必須 DSP/UI フレームワーク ===
         src/PluginProcessor.cpp
         src/PluginEditor.cpp
         src/PianoRollComponent.cpp
         src/GraphEditorComponent.cpp
-        
-        # === オプション: 以下のファイルが存在する場合は有効化してください ===
-        # src/OtoDatabase.cpp
-        # src/UstParser.cpp
-        # src/VowelClassifier.cpp
-        # src/StreamingVoice.cpp
-        # src/PitchCurveBuilder.cpp
-        # src/VoseBridge.cpp
 )
+
+# 2. オプションソースの自動検出ロジック
+# ファイルがプロジェクト内に存在する場合のみ、自動的にビルド対象に追加します。
+set(VOSE_OPTIONAL_SOURCES
+    src/OtoDatabase.cpp
+    src/UstParser.cpp
+    src/VowelClassifier.cpp
+    src/StreamingVoice.cpp
+    src/PitchCurveBuilder.cpp
+    src/VoseBridge.cpp
+)
+
+foreach(SOURCE_FILE ${VOSE_OPTIONAL_SOURCES})
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}")
+        target_sources(VoseVocal PRIVATE ${SOURCE_FILE})
+        message(STATUS "[VO-SE] Optional source detected and added: ${SOURCE_FILE}")
+    endif()
+endforeach()
 
 # ========================
 # インクルードディレクトリ
@@ -107,7 +100,7 @@ target_include_directories(VoseVocal
 # ========================
 target_compile_definitions(VoseVocal
     PUBLIC
-        # WebView, Curl, VST2互換性無効化（プラグインサイズ削減）
+        # 不要なモジュールを無効化してバイナリサイズを極限まで削減
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
@@ -117,28 +110,27 @@ target_compile_definitions(VoseVocal
 # Linux 固有設定
 # ========================
 if(UNIX AND NOT APPLE)
-    # ALSA（Advanced Linux Sound Architecture）を有効化
     target_compile_definitions(VoseVocal PUBLIC JUCE_ALSA=1)
-    # JACK サポート有効化（オプション）
-    # target_compile_definitions(VoseVocal PUBLIC JUCE_JACK=1)
 endif()
 
 # ========================
 # macOS 固有設定
 # ========================
 if(APPLE)
-    # 最小動作OSバージョン設定（有効化する場合はコメントアウト `#` を外してください）
-    # set_target_properties(VoseVocal_SharedCode PROPERTIES
-    #     MACOSX_DEPLOYMENT_TARGET 11.0
-    # )
+    # 互換性を担保するため、最小動作OSバージョンを macOS 11.0 (Big Sur) に設定
+    if(TARGET VoseVocal_SharedCode)
+        set_target_properties(VoseVocal_SharedCode PROPERTIES
+            MACOSX_DEPLOYMENT_TARGET "11.0"
+        )
+    endif()
 endif()
 
 # ========================
 # Windows 固有設定
 # ========================
 if(WIN32)
-    # Windows ビルド時の特定の警告を無視（必要に応じて）
-    # target_compile_options(VoseVocal PRIVATE /wd4996)
+    # MSVC特有の非推奨関数警告（POSIX互換関数など）を抑制し、ビルドログをクリーンに保つ
+    target_compile_options(VoseVocal PRIVATE /wd4996)
 endif()
 
 # ========================
@@ -146,31 +138,27 @@ endif()
 # ========================
 target_link_libraries(VoseVocal
     PRIVATE
-        # === コア オーディオ/MIDIプロセッシング ===
         juce::juce_audio_utils
         juce::juce_audio_processors
-        
-        # === GUI ===
         juce::juce_gui_basics
-        
-        # === DSP ===
         juce::juce_dsp
     PUBLIC
-        # === ビルドフラグ推奨事項 ===
         juce::juce_recommended_config_flags
-        juce::juce_recommended_lto_flags      # Link-Time Optimization
+        juce::juce_recommended_lto_flags      # Link-Time Optimization の有効化
         juce::juce_recommended_warning_flags
 )
 
 # ========================
-# macOS 用追加リンク（システム iconv を確実に結合する）
+# macOS 用追加リンク（LTO対策を含む iconv の完全結合）
 # ========================
 if(APPLE)
-    # 共有スタティックライブラリ、およびメインのメタターゲットにリンク
-    target_link_libraries(VoseVocal_SharedCode PRIVATE Iconv::Iconv)
+    # 共有コードのスタティックライブラリとメインメタターゲットにリンク
+    if(TARGET VoseVocal_SharedCode)
+        target_link_libraries(VoseVocal_SharedCode PRIVATE Iconv::Iconv)
+    endif()
     target_link_libraries(VoseVocal PRIVATE Iconv::Iconv)
     
-    # LTO最適化によるリンク漏れを防ぐため、各出力ターゲットに個別に直接リンクを波及させる
+    # 各出力バイナリへのリンク波及を保証（LTOによるデッドコードストリップ対策）
     if(TARGET VoseVocal_VST3)
         target_link_libraries(VoseVocal_VST3 PRIVATE Iconv::Iconv)
     endif()
@@ -183,11 +171,11 @@ if(APPLE)
 endif()
 
 # ========================
-# オプション設定（デバッグ出力）
+# ビルド構成のデバッグ出力
 # ========================
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    message(STATUS "VoseVocal Plugin ビルド設定:")
-    message(STATUS "  CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
-    message(STATUS "  VOSE_PLUGIN_FORMATS: ${VOSE_PLUGIN_FORMATS}")
-    message(STATUS "  Source dir: ${CMAKE_CURRENT_SOURCE_DIR}")
-endif()
+message(STATUS "=======================================================")
+message(STATUS "[VO-SE] Plugin Build Configuration:")
+message(STATUS "  - CMAKE_BUILD_TYPE:    ${CMAKE_BUILD_TYPE}")
+message(STATUS "  - PLUGIN_FORMATS:      ${VOSE_PLUGIN_FORMATS}")
+message(STATUS "  - SOURCE_DIR:          ${CMAKE_CURRENT_SOURCE_DIR}")
+message(STATUS "=======================================================")
