@@ -120,9 +120,9 @@ endif()
 # ========================
 if(APPLE)
     # 最小デプロイメントバージョン設定（オプション）
-    # set_target_properties(VoseVocal PROPERTIES
-    #     MACOSX_DEPLOYMENT_TARGET 11.0
-    # )
+    set_target_properties(VoseVocal PROPERTIES
+    MACOSX_DEPLOYMENT_TARGET 11.0
+    )
 endif()
 
 # ========================
