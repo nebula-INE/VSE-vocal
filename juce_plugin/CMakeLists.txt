@@ -142,6 +142,7 @@ target_link_libraries(VoseVocal
         juce::juce_audio_processors
         juce::juce_gui_basics
         juce::juce_dsp
+        iconv                                 # <- ここに追加
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags      # Link-Time Optimization の有効化
