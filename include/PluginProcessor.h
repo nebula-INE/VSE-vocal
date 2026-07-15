@@ -1,31 +1,27 @@
 // PluginProcessor.h
-// フェーズ1 PoC v2: MIDIノートオンで StreamingVoice::pushNote、
-// processBlock で StreamingVoice::pull を直接呼ぶ「本物のリアルタイム再生」版。
-// (旧v1のオフラインバウンス方式は RenderEngine.h に残置、書き出し機能用に転用予定)
-//
-// [フェーズ3 差分] ピアノロール編集用に以下を追加:
-//   - songTempo メンバ（UST読み込み時にプロジェクトのテンポを保持。ピアノロールの
-//     グリッド表示や新規ノートのデフォルト長に使う）
-//   - getSongNotesSnapshot() / setSongNotesFromEditor() / getSongTempo() /
-//     getSongPositionSeconds() の4メソッド
-// 既存のMIDI経由の再生パス（pushNote等）やUST読み込みパスは変更していない。
+// フェーズ4 PoC: マルチトラック(最大4)、buffer_ms調整、ホストトランスポート同期、
+// UST書き出しをサポート。
 
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "VoseBridge.h"
-#include "StreamingVoice.h"
-#include "OtoDatabase.h"
+#include "VoiceTrack.h"
 #include "VowelClassifier.h"
 #include "UstParser.h"
 #include "UstFlags.h"
 #include "PitchCurveBuilder.h"
-#include "AutomationCurves.h"
+#include <array>
 #include <deque>
 
 class VoseAudioProcessor : public juce::AudioProcessor
 {
 public:
+    static constexpr int kMaxTracks = 4;
+    static constexpr int kDefaultBufferMs = 500;
+    static constexpr int kMinBufferMs = 100;
+    static constexpr int kMaxBufferMs = 2000;
+
     VoseAudioProcessor();
     ~VoseAudioProcessor() override;
 
@@ -50,57 +46,54 @@ public:
     void getStateInformation (juce::MemoryBlock&) override {}
     void setStateInformation (const void*, int) override {}
 
-    // エディタ(UI)から呼ばれる。音源フォルダを選び直すたびに
-    // oto.iniの再パース + load_embedded_resource + set_oto_data をやり直す。
-    void loadVoiceDirectory (const juce::File& dir);
-    int  getLoadedAliasCount() const { return otoDb.size(); }
+    // --- 音源フォルダ（マルチトラック対応） ---
+    // trackIndex省略時はトラック0（フェーズ3以前のUIとの後方互換用）。
+    void loadVoiceDirectory (const juce::File& dir, int trackIndex = 0);
+    int  getLoadedAliasCount (int trackIndex = 0) const;
+
+    // トラックのミキサー設定
+    void setTrackGain (int trackIndex, float linearGain);
+    void setTrackPan (int trackIndex, float pan);
+    void setTrackMuted (int trackIndex, bool muted);
+    juce::String getTrackVoiceDirName (int trackIndex) const;
 
     // 優先3: 内蔵歌詞キューUI（生MIDIキーボード演奏用のフォールバック経路）。
-    // スペース区切りの文字列を受け取り、ノートオンのたびに1語ずつ
-    // ローテーションで消費する（テスト時にループし続けられるように）。
-    // UIスレッド(message thread)から呼ばれるので、オーディオスレッドとの
-    // 共有には短時間のSpinLockを使う（頻度が低いので実用上問題ない）。
     void setLyricSequence (const juce::String& spaceSeparatedText);
     juce::String getLyricSequenceText() const;
 
     // --- UST曲再生（優先1/3のライブMIDIとは独立した経路） ---
-    // ロード成功時 true。songNotes を構築するだけで自動再生はしない。
     bool loadUstFile (const juce::File& ustFile);
-    void startSongPlayback();  // 曲頭から再生開始
+    void startSongPlayback();  // 曲頭から再生開始（内部クロックモード時のみ意味を持つ）
     void stopSongPlayback();
-    bool isSongPlaying() const { return songPlaying; }
-    int  getLoadedSongNoteCount() const { return (int) songNotes.size(); }
+    bool isSongPlaying() const { return songPlaying.load(); }
+    int  getLoadedSongNoteCount() const { const juce::SpinLock::ScopedLockType sl (songNotesLock); return (int) songNotes.size(); }
 
-    // --- [フェーズ3] ピアノロール編集用アクセサ ---
-    //
-    // songNotes は現状「UST読み込み時にmessage threadが書き込み、再生中は
-    // オーディオスレッドが読むだけ」という前提でロック無しに設計されている
-    // （既存コードのlyricSequence用SpinLockコメント参照）。ピアノロールからの
-    // 編集も同じ前提を踏襲し、setSongNotesFromEditor() は書き込み前に必ず
-    // 再生を停止することでレースコンディションを避ける。リアルタイムに
-    // 再生しながら編集を反映したい場合は、songNotes自体をSpinLock/ダブル
-    // バッファ化するなどの改善が別途必要（TODO、フェーズ3スコープ外）。
+    void setEditedNotes (std::vector<ScheduledSongNote> notes);
+    std::vector<ScheduledSongNote> getSongNotesSnapshot() const
+    {
+        const juce::SpinLock::ScopedLockType sl (songNotesLock);
+        return songNotes;
+    }
 
-    // 現在のノート一覧のスナップショットを返す（エディタ表示・PianoRollComponentへの
-    // 初期値供給用）。呼び出しは message thread から想定。
-    std::vector<ScheduledSongNote> getSongNotesSnapshot() const { return songNotes; }
+    double getCurrentTempo() const { return currentTempoBpm; }
+    void setProjectName (const juce::String& name) { projectName = name; }
+    juce::String getProjectName() const { return projectName; }
 
-    // ピアノロールでの編集結果を反映する。startTimeSec昇順である必要はない
-    // （呼び出し側でソート済みでなくても内部でソートする）。
-    void setSongNotesFromEditor (std::vector<ScheduledSongNote> newNotes, double tempo);
+    // --- フェーズ4: UST書き出し ---
+    // 現在のsongNotes(+テンポ)をUST形式のテキストファイルとして保存する。
+    bool exportToUstFile (const juce::File& outFile) const;
 
-    double getSongTempo() const { return songTempo; }
+    // --- フェーズ4: buffer_ms調整 ---
+    // UI(message thread)から呼ぶ。実際の反映はprocessBlock冒頭で行う
+    // （vose_core側のセッション再生成を伴うため、audio thread内で
+    //  同期的に行うのは理想的ではないが、頻度が低いユーザー操作なので許容する。
+    //  詳細はPluginProcessor.cppのコメント参照）。
+    void requestBufferMs (int ms) { pendingBufferMs.store (juce::jlimit (kMinBufferMs, kMaxBufferMs, ms)); }
+    int  getActiveBufferMs() const { return activeBufferMs.load(); }
 
-    // 再生ヘッド表示用。曲頭からの経過秒数（非再生中は最後の位置を保持）。
-    double getSongPositionSeconds() const { return songPositionSec; }
-
-    // --- [フェーズ3] グラフエディタ（Pitch/Gender/Tension/Breathオートメーション） ---
-    // songNotesと同様、message threadからの書き込み・オーディオスレッドからの
-    // 読み込みというロックフリー前提。setAutomationFromEditor()はいつ呼んでも
-    // 安全（単純なメンバ代入のみで、再生中のノートスケジューリングには
-    // 影響しない。次にpushSongNote()が呼ばれた時点から新しいカーブが反映される）。
-    AutomationCurves getAutomationSnapshot() const { return automation; }
-    void setAutomationFromEditor (AutomationCurves newCurves) { automation = std::move (newCurves); }
+    // --- フェーズ4: ホストトランスポート同期 ---
+    void setSyncToHostTransport (bool shouldSync) { syncToHostTransport = shouldSync; }
+    bool getSyncToHostTransport() const { return syncToHostTransport; }
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -108,56 +101,57 @@ private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     // ノートオンに応じて次の歌詞を1つ確定し、streaming APIへノートを積む。
-    void pushNote (int midiNoteNumber);
+    // trackIndexはMIDIチャンネル(1-16)から決まる（ch1-4 -> track0-3、ch5以降はtrack3に丸める）。
+    void pushNote (int midiNoteNumber, int trackIndex);
 
-    // USTスケジューラから呼ばれる版。歌詞はキュー消費ではなくUST側の指定を使う。
+    // USTスケジューラから呼ばれる版。常にトラック0（UST自体が単一パート仕様のため）。
     void pushSongNote (const ScheduledSongNote& note);
 
-    // pushNote/pushSongNote の共通部分（VCV解決 + streaming_render_push_note呼び出し）。
-    // pitchCurveHz / genderCurve / tensionCurve / breathCurve は呼び出し側で
-    // 組み立て済みのカーブをそのまま使う。
-    // (MIDI経由は常にAPVTSのグローバル値、UST経由はFlags上書きがあればそちら優先)
-    // portamentoOffsetsCents はネイティブAPI経由で渡す別カーブ（省略可、その場合0セント）。
-    void resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric,
+    void resolveAndPushNote (int trackIndex, const std::vector<double>& pitchCurveHz, const juce::String& lyric,
                               const std::vector<double>& genderCurve,
                               const std::vector<double>& tensionCurve,
                               const std::vector<double>& breathCurve,
                               const std::vector<double>& portamentoOffsetsCents = {});
 
-    // 優先順位: 1) MIDI Lyric/Textメタイベント由来のキュー（同一ブロック内で
-    // オーディオスレッドのみが読み書きするのでロック不要）
-    // 2) 内蔵歌詞キューUI（ロック付き、ローテーション）
     juce::String consumeNextLyric();
 
-    VoseCoreLibrary  coreLib;
-    StreamingVoice   voice;
-    OtoDatabase      otoDb;
-    VowelClassifier  vowelClassifier;
+    // buffer_ms変更の実適用。processBlock冒頭から呼ぶ。
+    void applyPendingBufferMsIfNeeded();
 
-    // 優先1: MIDI Lyric/Textメタイベント由来。processBlock内でのみ触るため
-    // 単一スレッド前提でロック不要（オーディオスレッド専有）。
+    // ホストトランスポート同期の実適用。processBlock冒頭から呼ぶ。
+    void syncFromHostTransportIfEnabled();
+
+    VoseCoreLibrary coreLib;
+    std::array<VoiceTrack, kMaxTracks> tracks;
+    VowelClassifier vowelClassifier;
+
     std::deque<juce::String> midiLyricQueue;
 
-    // 優先3: 内蔵歌詞キューUI。message threadから書き込まれるためロックが要る。
     juce::SpinLock    lyricLock;
     juce::StringArray lyricSequence { "a" };
     int               lyricSequenceIndex = 0;
 
-    juce::String prevLyric; // VcvResolver.resolve() の prev_lyric と同じ役割
+    juce::String prevLyric;
+    juce::String projectName { "Untitled" };
 
-    // --- UST曲再生用スケジューラ状態（オーディオスレッドがprocessBlock内で
-    // サンプル数から自前で経過時間を積算する。ホストのトランスポートには
-    // 同期しないシンプルな内部クロック方式。TODO: AudioPlayHead同期） ---
+    mutable juce::SpinLock         songNotesLock;
     std::vector<ScheduledSongNote> songNotes;
-    double songTempo = 120.0; // [フェーズ3] UST読み込み時のテンポ。ピアノロールのグリッドに使う。
-    AutomationCurves automation; // [フェーズ3] グラフエディタで編集するPitch/Gender/Tension/Breathカーブ
     size_t songNoteCursor = 0;
-    bool   songPlaying = false;
+    std::atomic<bool> songPlaying { false };
     double songPositionSec = 0.0;
     double currentSampleRate = 44100.0;
+    double currentTempoBpm = kUstDefaultTempo;
 
-    // pull() が要求サンプル数より少なく返した場合に備えたスクラッチバッファ
+    // --- buffer_ms調整用 ---
+    std::atomic<int> pendingBufferMs { kDefaultBufferMs };
+    std::atomic<int> activeBufferMs  { kDefaultBufferMs };
+
+    // --- ホストトランスポート同期用 ---
+    std::atomic<bool> syncToHostTransport { false };
+    double lastKnownHostTimeSec = -1.0;
+
     juce::AudioBuffer<float> pullScratch;
+    juce::AudioBuffer<float> mixScratch;
 
     int64_t nextNoteId = 1;
     bool anyNoteHeld = false;
