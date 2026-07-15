@@ -1,6 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
-#include <algorithm>
+#include "UstWriter.h"
 
 VoseAudioProcessor::VoseAudioProcessor()
     : juce::AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
@@ -17,33 +17,16 @@ VoseAudioProcessor::VoseAudioProcessor()
                                    "Rebuild vose_core with vose_streaming_final.cpp linked.");
     }
 
-    // 開発用デフォルト音源フォルダ。実運用ではエディタの「音源を開く」で
-    // loadVoiceDirectory() を呼び直す想定（フェーズ3のUI実装で接続）。
+    // 開発用デフォルト音源フォルダをトラック0に読み込む。
     auto defaultVoiceDir = pluginDir.getChildFile ("voices").getChildFile ("default");
     if (defaultVoiceDir.isDirectory())
-        loadVoiceDirectory (defaultVoiceDir);
-}
-
-void VoseAudioProcessor::loadVoiceDirectory (const juce::File& dir)
-{
-    otoDb.clear();
-    const int entryCount = otoDb.loadVoiceDir (dir);
-
-    if (entryCount == 0)
-    {
-        juce::Logger::writeToLog ("VO-SE: oto.ini が見つからないか0エントリでした: "
-                                   + dir.getFullPathName());
-        return;
-    }
-
-    const int loaded = otoDb.pushAllToCore (coreLib);
-    juce::Logger::writeToLog ("VO-SE: oto.ini " + juce::String (entryCount) + "エントリ解析、"
-                               + juce::String (loaded) + "件のWAVをコアへ事前登録しました。");
+        loadVoiceDirectory (defaultVoiceDir, 0);
 }
 
 VoseAudioProcessor::~VoseAudioProcessor()
 {
-    voice.stop();
+    for (auto& t : tracks)
+        t.voice.stop();
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout VoseAudioProcessor::createParameterLayout()
@@ -51,6 +34,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoseAudioProcessor::createPa
     using Param = juce::AudioParameterFloat;
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
+    // Gender/Tension/Breathは現状トラック共通のグローバル値（各トラック別設定は
+    // マルチトラック対応の次のステップとして持ち越し。UST Flagsによる
+    // ノート単位の上書きは既にトラックごとに効く）。
     params.push_back (std::make_unique<Param> (juce::ParameterID { "gender", 1 }, "Gender",
                                                 juce::NormalisableRange<float> (0.0f, 1.0f), 0.5f));
     params.push_back (std::make_unique<Param> (juce::ParameterID { "tension", 1 }, "Tension",
@@ -63,19 +49,76 @@ juce::AudioProcessorValueTreeState::ParameterLayout VoseAudioProcessor::createPa
 
 void VoseAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    pullScratch.setSize (2, samplesPerBlock);
+    pullScratch.setSize (1, samplesPerBlock);
+    mixScratch.setSize (2, samplesPerBlock);
     anyNoteHeld = false;
     currentSampleRate = sampleRate;
+    lastKnownHostTimeSec = -1.0;
 
-    // StreamingSynthesizer はサンプルレート依存の内部バッファ(RingBuffer)を
-    // コンストラクタで確保するので、サンプルレートが分かるここで作り直す。
+    activeBufferMs = pendingBufferMs.load();
     if (coreLib.supportsStreaming())
-        voice.start (coreLib, sampleRate, /*bufferMs*/ 500);
+        for (auto& t : tracks)
+            t.startStreaming (coreLib, sampleRate, activeBufferMs.load());
 }
 
 void VoseAudioProcessor::releaseResources()
 {
-    voice.stop();
+    for (auto& t : tracks)
+        t.voice.stop();
+}
+
+void VoseAudioProcessor::loadVoiceDirectory (const juce::File& dir, int trackIndex)
+{
+    trackIndex = juce::jlimit (0, kMaxTracks - 1, trackIndex);
+    auto& track = tracks[(size_t) trackIndex];
+
+    track.otoDb.clear();
+    const int entryCount = track.otoDb.loadVoiceDir (dir);
+
+    if (entryCount == 0)
+    {
+        juce::Logger::writeToLog ("VO-SE: oto.ini が見つからないか0エントリでした: "
+                                   + dir.getFullPathName());
+        return;
+    }
+
+    const int loaded = track.otoDb.pushAllToCore (coreLib);
+    track.voiceDirPath = dir.getFullPathName();
+
+    juce::Logger::writeToLog ("VO-SE: [track" + juce::String (trackIndex) + "] oto.ini "
+                               + juce::String (entryCount) + "エントリ解析、"
+                               + juce::String (loaded) + "件のWAVをコアへ事前登録しました。");
+}
+
+int VoseAudioProcessor::getLoadedAliasCount (int trackIndex) const
+{
+    trackIndex = juce::jlimit (0, kMaxTracks - 1, trackIndex);
+    return tracks[(size_t) trackIndex].otoDb.size();
+}
+
+void VoseAudioProcessor::setTrackGain (int trackIndex, float linearGain)
+{
+    trackIndex = juce::jlimit (0, kMaxTracks - 1, trackIndex);
+    tracks[(size_t) trackIndex].gain.store (juce::jlimit (0.0f, 2.0f, linearGain));
+}
+
+void VoseAudioProcessor::setTrackPan (int trackIndex, float pan)
+{
+    trackIndex = juce::jlimit (0, kMaxTracks - 1, trackIndex);
+    tracks[(size_t) trackIndex].pan.store (juce::jlimit (-1.0f, 1.0f, pan));
+}
+
+void VoseAudioProcessor::setTrackMuted (int trackIndex, bool muted)
+{
+    trackIndex = juce::jlimit (0, kMaxTracks - 1, trackIndex);
+    tracks[(size_t) trackIndex].muted.store (muted);
+}
+
+juce::String VoseAudioProcessor::getTrackVoiceDirName (int trackIndex) const
+{
+    trackIndex = juce::jlimit (0, kMaxTracks - 1, trackIndex);
+    const auto& path = tracks[(size_t) trackIndex].voiceDirPath;
+    return path.isEmpty() ? juce::String ("(未設定)") : juce::File (path).getFileName();
 }
 
 void VoseAudioProcessor::setLyricSequence (const juce::String& spaceSeparatedText)
@@ -98,8 +141,6 @@ juce::String VoseAudioProcessor::getLyricSequenceText() const
 
 juce::String VoseAudioProcessor::consumeNextLyric()
 {
-    // 優先1: MIDI Lyric/Textメタイベント由来（processBlock内でのみ読み書きするので
-    // ロック不要。ここは必ずオーディオスレッドから呼ばれる前提）。
     if (! midiLyricQueue.empty())
     {
         auto lyric = midiLyricQueue.front();
@@ -107,7 +148,6 @@ juce::String VoseAudioProcessor::consumeNextLyric()
         return lyric;
     }
 
-    // 優先3: 内蔵歌詞キューUI。ローテーションしてテスト時にループさせ続ける。
     const juce::SpinLock::ScopedLockType sl (lyricLock);
     if (lyricSequence.isEmpty())
         return "a";
@@ -117,18 +157,17 @@ juce::String VoseAudioProcessor::consumeNextLyric()
     return lyric;
 }
 
-void VoseAudioProcessor::pushNote (int midiNoteNumber)
+void VoseAudioProcessor::pushNote (int midiNoteNumber, int trackIndex)
 {
     constexpr int kRes = 128;
     const double hz = 440.0 * std::pow (2.0, (midiNoteNumber - 69) / 12.0);
-    std::vector<double> flatCurve (kRes, hz); // ライブMIDIにはポルタメント/ビブラート情報が無いので一定ピッチ
+    std::vector<double> flatCurve (kRes, hz);
 
-    // MIDI経由には per-note Flags 相当の情報源が無いので、常にAPVTSのグローバル値を使う。
     std::vector<double> genderCurve (kRes, (double) apvts.getRawParameterValue ("gender")->load());
     std::vector<double> tensionCurve (kRes, (double) apvts.getRawParameterValue ("tension")->load());
     std::vector<double> breathCurve (kRes, (double) apvts.getRawParameterValue ("breath")->load());
 
-    resolveAndPushNote (flatCurve, consumeNextLyric(), genderCurve, tensionCurve, breathCurve);
+    resolveAndPushNote (trackIndex, flatCurve, consumeNextLyric(), genderCurve, tensionCurve, breathCurve);
 }
 
 void VoseAudioProcessor::pushSongNote (const ScheduledSongNote& note)
@@ -136,89 +175,53 @@ void VoseAudioProcessor::pushSongNote (const ScheduledSongNote& note)
     constexpr int kRes = 128;
     const double durationMs = note.durationSec * 1000.0;
 
-    // ビブラートはここで焼き込む（ネイティブ側は簡易モデルでUSTのVBRを
-    // 再現できず、かつVoseStreamNoteにはそもそも経路が無いため）。
     auto pitchCurve = vose_pitch::buildVibratoPitchCurveHz (note.noteNum, durationMs, note.vibrato, kRes);
-
-    // ポルタメントはネイティブの portamento_offsets 経由で渡す（忠実度の劣化なし）。
     auto portamentoCents = vose_pitch::buildPortamentoCentsCurve (note.pbs, note.pbw, note.pby, durationMs, kRes);
 
-    // UST の Flags（例: "g-5B50"）でノート単位の上書きがあればそちらを優先し、
-    // 無ければAPVTSのグローバル値にフォールバックする。
     const auto flagOverrides = parseUstFlags (note.flags);
-
-    const double genderVal  = flagOverrides.gender01.value_or  ((double) apvts.getRawParameterValue ("gender")->load());
-    const double tensionVal = flagOverrides.tension01.value_or ((double) apvts.getRawParameterValue ("tension")->load());
-    const double breathVal  = flagOverrides.breath01.value_or  ((double) apvts.getRawParameterValue ("breath")->load());
+    const double genderVal  = note.genderOverride01.value_or (
+                                   flagOverrides.gender01.value_or  ((double) apvts.getRawParameterValue ("gender")->load()));
+    const double tensionVal = note.tensionOverride01.value_or (
+                                   flagOverrides.tension01.value_or ((double) apvts.getRawParameterValue ("tension")->load()));
+    const double breathVal  = note.breathOverride01.value_or (
+                                   flagOverrides.breath01.value_or  ((double) apvts.getRawParameterValue ("breath")->load()));
 
     std::vector<double> genderCurve (kRes, genderVal);
     std::vector<double> tensionCurve (kRes, tensionVal);
     std::vector<double> breathCurve (kRes, breathVal);
 
-    // [フェーズ3] グラフエディタで打ち込んだPitch/Gender/Tension/Breathオートメーションが
-    // あれば、ノート単位の固定値（Flags/APVTS）よりもこちらを優先してサンプリングする。
-    // 曲頭からの絶対時刻(note.startTimeSec起点)でサンプリングするため、UST/ピアノロールの
-    // 時間軸とグラフエディタの時間軸は同じ「曲頭からの秒数」で揃っている前提。
-    const int denom = juce::jmax (1, kRes - 1);
-    const bool hasGender  = automation.hasPoints (AutomationParam::gender);
-    const bool hasTension = automation.hasPoints (AutomationParam::tension);
-    const bool hasBreath  = automation.hasPoints (AutomationParam::breath);
-    const bool hasPitch   = automation.hasPoints (AutomationParam::pitch);
-
-    if (hasGender || hasTension || hasBreath || hasPitch)
-    {
-        for (int j = 0; j < kRes; ++j)
-        {
-            const double tAbsSec = note.startTimeSec + (note.durationSec * ((double) j / (double) denom));
-
-            if (hasGender)
-                genderCurve[(size_t) j] = *automation.evaluate (AutomationParam::gender, tAbsSec);
-            if (hasTension)
-                tensionCurve[(size_t) j] = *automation.evaluate (AutomationParam::tension, tAbsSec);
-            if (hasBreath)
-                breathCurve[(size_t) j] = *automation.evaluate (AutomationParam::breath, tAbsSec);
-
-            if (hasPitch)
-            {
-                const double semitoneOffset = AutomationRanges::pitchValueToSemitones (
-                    *automation.evaluate (AutomationParam::pitch, tAbsSec));
-                pitchCurve[(size_t) j] *= std::pow (2.0, semitoneOffset / 12.0);
-            }
-        }
-    }
-
-    resolveAndPushNote (pitchCurve, note.lyric, genderCurve, tensionCurve, breathCurve, portamentoCents);
+    // USTは単一パート仕様のため、常にトラック0を使う（マルチトラックUST風合成は対象外）。
+    resolveAndPushNote (0, pitchCurve, note.lyric, genderCurve, tensionCurve, breathCurve, portamentoCents);
 }
 
-void VoseAudioProcessor::resolveAndPushNote (const std::vector<double>& pitchCurveHz, const juce::String& lyric,
+void VoseAudioProcessor::resolveAndPushNote (int trackIndex, const std::vector<double>& pitchCurveHz,
+                                              const juce::String& lyric,
                                               const std::vector<double>& genderCurve,
                                               const std::vector<double>& tensionCurve,
                                               const std::vector<double>& breathCurve,
                                               const std::vector<double>& portamentoOffsetsCents)
 {
-    // vcv_resolver.py の VcvResolver.resolve_note() と同じ手順:
-    //   1. 音源にVCVエイリアスが存在する場合のみ、前ノートの歌詞から末尾母音を判定
-    //   2. resolveAlias(lyric, prevVowel) で VCV→CV→単独音→部分一致 の順に解決
+    trackIndex = juce::jlimit (0, kMaxTracks - 1, trackIndex);
+    auto& track = tracks[(size_t) trackIndex];
+
     juce::String prevVowel;
-    if (otoDb.hasVcv() && prevLyric.isNotEmpty())
+    if (track.otoDb.hasVcv() && prevLyric.isNotEmpty())
         prevVowel = vowelClassifier.trailingVowel (prevLyric);
 
-    const auto* entry = otoDb.resolveAlias (lyric, prevVowel);
+    const auto* entry = track.otoDb.resolveAlias (lyric, prevVowel);
 
     if (entry == nullptr)
     {
-        juce::Logger::writeToLog ("VO-SE: 歌詞 '" + lyric + "' に対応するoto.iniエントリが見つかりません。"
-                                   "loadVoiceDirectory() で音源フォルダを読み込んでいますか？");
+        juce::Logger::writeToLog ("VO-SE: [track" + juce::String (trackIndex) + "] 歌詞 '" + lyric
+                                   + "' に対応するoto.iniエントリが見つかりません。");
     }
 
     const juce::String aliasToUse = (entry != nullptr) ? entry->alias : lyric;
 
-    // wav_path フィールドには実パスではなく oto.ini の alias（音源キー）を渡す。
-    // vose_core::find_voice_ref / g_oto_db はこのキーで検索する。
-    voice.pushNote (nextNoteId++, aliasToUse, pitchCurveHz, genderCurve, tensionCurve, breathCurve,
-                     portamentoOffsetsCents);
+    track.voice.pushNote (nextNoteId++, aliasToUse, pitchCurveHz, genderCurve, tensionCurve, breathCurve,
+                           portamentoOffsetsCents);
 
-    prevLyric = lyric; // 次ノートのVCV解決用（VcvResolver.resolve()のprev_lyric更新と同じ）
+    prevLyric = lyric;
 }
 
 bool VoseAudioProcessor::loadUstFile (const juce::File& ustFile)
@@ -233,23 +236,41 @@ bool VoseAudioProcessor::loadUstFile (const juce::File& ustFile)
         return false;
     }
 
-    songNotes = UstParser::toScheduledNotes (project);
-    songTempo = project.tempo; // [フェーズ3] ピアノロールのグリッド表示用に保持
-    songNoteCursor = 0;
-    songPositionSec = 0.0;
     songPlaying = false;
+    auto newNotes = UstParser::toScheduledNotes (project);
+    {
+        const juce::SpinLock::ScopedLockType sl (songNotesLock);
+        songNotes = std::move (newNotes);
+        songNoteCursor = 0;
+    }
+    songPositionSec = 0.0;
+    currentTempoBpm = project.tempo;
+    if (project.projectName.isNotEmpty())
+        projectName = project.projectName;
 
     juce::Logger::writeToLog ("VO-SE: UST読み込み完了。" + juce::String ((int) songNotes.size()) + "ノート、"
                                + "テンポ=" + juce::String (project.tempo));
     return true;
 }
 
-void VoseAudioProcessor::startSongPlayback()
+void VoseAudioProcessor::setEditedNotes (std::vector<ScheduledSongNote> notes)
 {
+    songPlaying = false;
+    const juce::SpinLock::ScopedLockType sl (songNotesLock);
+    songNotes = std::move (notes);
     songNoteCursor = 0;
     songPositionSec = 0.0;
+}
+
+void VoseAudioProcessor::startSongPlayback()
+{
+    {
+        const juce::SpinLock::ScopedLockType sl (songNotesLock);
+        songNoteCursor = 0;
+    }
+    songPositionSec = 0.0;
     prevLyric.clear();
-    songPlaying = ! songNotes.empty();
+    songPlaying = (getLoadedSongNoteCount() > 0);
 }
 
 void VoseAudioProcessor::stopSongPlayback()
@@ -257,23 +278,76 @@ void VoseAudioProcessor::stopSongPlayback()
     songPlaying = false;
 }
 
-// [フェーズ3] ピアノロールでの編集結果をプロセッサに反映する。
-// songNotes は再生中のオーディオスレッドから読まれるため、書き換え前に
-// 必ず停止する（PluginProcessor.h のコメント参照：ロックフリー設計の前提を
-// 崩さないための単純な対策。真にリアルタイムな編集反映が必要になったら
-// ダブルバッファ化を検討する）。
-void VoseAudioProcessor::setSongNotesFromEditor (std::vector<ScheduledSongNote> newNotes, double tempo)
+bool VoseAudioProcessor::exportToUstFile (const juce::File& outFile) const
 {
-    stopSongPlayback();
+    auto snapshot = getSongNotesSnapshot();
+    return UstWriter::write (outFile, snapshot, currentTempoBpm, projectName);
+}
 
-    std::sort (newNotes.begin(), newNotes.end(),
-               [] (const ScheduledSongNote& a, const ScheduledSongNote& b)
-               { return a.startTimeSec < b.startTimeSec; });
+void VoseAudioProcessor::applyPendingBufferMsIfNeeded()
+{
+    const int wanted = pendingBufferMs.load();
+    if (wanted == activeBufferMs.load())
+        return;
 
-    songNotes = std::move (newNotes);
-    songTempo = juce::jmax (1.0, tempo);
-    songNoteCursor = 0;
-    songPositionSec = 0.0;
+    // 【注意: 厳密にはリアルタイム安全ではない】
+    // streaming_render_create/destroy はvose_core内部でスレッド生成・破棄を伴う
+    // 可能性があり、これをaudio threadから同期的に呼ぶのは理想的ではない。
+    // ただしbuffer_ms変更はユーザーが明示的に操作した時だけ発生する低頻度イベント
+    // であり、変更の瞬間に短い音切れが起きることを許容する前提で、実装をシンプルに
+    // 保つためあえてここで同期的に行っている。継続的な自動化には使わないこと。
+    if (coreLib.supportsStreaming())
+    {
+        for (auto& t : tracks)
+        {
+            t.voice.stop();
+            t.startStreaming (coreLib, currentSampleRate, wanted);
+        }
+    }
+    activeBufferMs = wanted;
+}
+
+void VoseAudioProcessor::syncFromHostTransportIfEnabled()
+{
+    if (! syncToHostTransport.load())
+        return;
+
+    auto* playHead = getPlayHead();
+    if (playHead == nullptr)
+        return;
+
+    const auto position = playHead->getPosition();
+    if (! position.hasValue())
+        return;
+
+    const bool hostIsPlaying = position->getIsPlaying();
+    const double hostTimeSec = position->getTimeInSeconds().orFallback (0.0);
+
+    songPlaying = hostIsPlaying && (getLoadedSongNoteCount() > 0);
+
+    if (! hostIsPlaying)
+    {
+        lastKnownHostTimeSec = -1.0; // 停止中はシーク検出をリセット
+        return;
+    }
+
+    // シーク検出: 前回位置からの差が「1ブロック分の進み」から大きく外れていたら
+    // ユーザーが再生位置を動かしたとみなし、スキップした区間のノートは
+    // 発音せずにカーソルだけ進める（DAWの一般的な挙動に合わせる）。
+    constexpr double kSeekToleranceSec = 0.25;
+    const bool looksLikeSeek = (lastKnownHostTimeSec < 0.0)
+                                || std::abs (hostTimeSec - lastKnownHostTimeSec) > kSeekToleranceSec;
+
+    if (looksLikeSeek)
+    {
+        const juce::SpinLock::ScopedLockType sl (songNotesLock);
+        songNoteCursor = 0;
+        while (songNoteCursor < songNotes.size() && songNotes[songNoteCursor].startTimeSec < hostTimeSec)
+            ++songNoteCursor; // 発音はせず読み飛ばすだけ
+    }
+
+    songPositionSec = hostTimeSec;
+    lastKnownHostTimeSec = hostTimeSec;
 }
 
 void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -281,13 +355,13 @@ void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
 
+    applyPendingBufferMsIfNeeded();
+    syncFromHostTransportIfEnabled();
+
     // ---- MIDI処理 ----
     // 優先1: Lyric(type=5)/Text(type=1)メタイベントを見つけたらキューに積む。
-    // 標準MIDIのカラオケ形式（DAWのピアノロールで歌詞を打ち込む方式）はこれで拾える。
     // 優先3: 見つからなければ内蔵歌詞キューUIをローテーション消費する(pushNote内)。
-    //
-    // pushNote は streaming_render_push_note を呼ぶだけで、合成そのものは
-    // vose_core側のワーカースレッドが行うため、ここはノンブロッキング。
+    // MIDIチャンネル(1-16)でトラックを選ぶ: ch1-4 -> track0-3、ch5以降はtrack3に丸める。
     for (const auto metadata : midi)
     {
         const auto msg = metadata.getMessage();
@@ -295,12 +369,13 @@ void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         if (msg.isTextMetaEvent())
         {
             const int metaType = msg.getMetaEventType();
-            if (metaType == 5 || metaType == 1) // 5=Lyric, 1=Text
+            if (metaType == 5 || metaType == 1)
                 midiLyricQueue.push_back (msg.getTextFromTextMetaEvent());
         }
         else if (msg.isNoteOn())
         {
-            pushNote (msg.getNoteNumber());
+            const int trackIndex = juce::jlimit (0, kMaxTracks - 1, msg.getChannel() - 1);
+            pushNote (msg.getNoteNumber(), trackIndex);
             anyNoteHeld = true;
         }
         else if (msg.isNoteOff())
@@ -309,51 +384,70 @@ void VoseAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         }
     }
 
-    // ---- UST曲スケジューラ: ホストトランスポート非同期の簡易内部クロック ----
-    // このブロックが表す時間窓 [songPositionSec, songPositionSec+blockDurationSec)
-    // に開始時刻が入るノートを全部トリガーする。songNotesは開始時刻順に
-    // 並んでいる前提（UstParser::toScheduledNotesおよび
-    // VoseAudioProcessor::setSongNotesFromEditorが単調増加で構築するため保証される）。
-    if (songPlaying)
+    // ---- UST曲スケジューラ ----
+    // 内部クロックモード: songPositionSecをこのブロックの長さぶん進める。
+    // ホスト同期モード: syncFromHostTransportIfEnabled()が既にsongPositionSecを
+    // 更新済みなので、ここでは「前回位置からの経過」ではなく現在値をそのまま使う。
+    if (songPlaying.load())
     {
         const double blockDurationSec = (double) buffer.getNumSamples() / currentSampleRate;
-        const double windowEnd = songPositionSec + blockDurationSec;
+        const double windowEnd = syncToHostTransport.load() ? songPositionSec
+                                                              : songPositionSec + blockDurationSec;
 
-        while (songNoteCursor < songNotes.size() && songNotes[songNoteCursor].startTimeSec < windowEnd)
+        std::vector<ScheduledSongNote> notesToTrigger;
         {
-            const auto& sn = songNotes[songNoteCursor];
-            if (! sn.lyric.trim().equalsIgnoreCase ("R")) // 休符は発音しない
+            const juce::SpinLock::ScopedLockType sl (songNotesLock);
+            while (songNoteCursor < songNotes.size() && songNotes[songNoteCursor].startTimeSec < windowEnd)
+            {
+                notesToTrigger.push_back (songNotes[songNoteCursor]);
+                ++songNoteCursor;
+            }
+            if (songNoteCursor >= songNotes.size() && ! syncToHostTransport.load())
+                songPlaying = false; // 内部クロックモードのみ自動停止（ホスト同期時はホストが止めるまで待つ）
+        }
+
+        for (const auto& sn : notesToTrigger)
+        {
+            if (! sn.lyric.trim().equalsIgnoreCase ("R"))
             {
                 pushSongNote (sn);
                 anyNoteHeld = true;
             }
-            ++songNoteCursor;
         }
 
-        songPositionSec = windowEnd;
-        if (songNoteCursor >= songNotes.size())
-            songPlaying = false; // 曲の最後まで再生したら自動停止
+        if (! syncToHostTransport.load())
+            songPositionSec = windowEnd;
     }
 
-    if (! voice.isActive())
-        return;
-
+    // ---- トラックのpull + ミックス ----
     const int numOut = buffer.getNumSamples();
-
-    // pull() はモノラルPCMを返す前提（RingBuffer<float>1本）。
-    // ステレオ出力には両チャンネルへ同じ値を複製する。
     pullScratch.setSize (1, numOut, false, false, true);
     float* mono = pullScratch.getWritePointer (0);
 
-    const int got = voice.pull (mono, numOut);
-    if (got <= 0)
-        return; // まだバッファが埋まっていない（発音直後など）。無音で待つ。
-
-    for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+    for (auto& t : tracks)
     {
-        float* dst = buffer.getWritePointer (ch);
+        if (! t.voice.isActive() || t.muted.load())
+            continue;
+
+        const int got = t.voice.pull (mono, numOut);
+        if (got <= 0)
+            continue;
+
+        const float gain = t.gain.load();
+        const float pan  = t.pan.load();
+        // 等パワーパン則。pan=0で両ch -3dB、pan=-1で左のみ、pan=+1で右のみ。
+        const double angle = (pan + 1.0) * (juce::MathConstants<double>::pi / 4.0);
+        const float leftGain  = gain * (float) std::cos (angle);
+        const float rightGain = gain * (float) std::sin (angle);
+
+        float* dstL = buffer.getWritePointer (0);
+        float* dstR = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : dstL;
+
         for (int i = 0; i < got; ++i)
-            dst[i] = mono[i];
+        {
+            dstL[i] += mono[i] * leftGain;
+            dstR[i] += mono[i] * rightGain;
+        }
     }
 }
 
