@@ -77,6 +77,13 @@ struct ScheduledSongNote
     double velocity01 = 1.0;       // intensity(0-200) を 0-1 に正規化したもの
     juce::String flags;            // 例: "g-5B50"。UstFlags.h でパースする
 
+    // グラフエディタ(GraphEditorComponent)からの明示的な上書き。
+    // 優先順位: これ > Flagsパース結果 > APVTSのグローバル値。
+    // UstParser::toScheduledNotes からは設定されない（nullopt=未指定）。
+    std::optional<double> genderOverride01;
+    std::optional<double> tensionOverride01;
+    std::optional<double> breathOverride01;
+
     // ポルタメント/ビブラート用の生データ。カーブそのものは
     // PitchCurveBuilder.h（呼び出し側）が組み立てる。
     juce::String pbs, pbw, pby;
