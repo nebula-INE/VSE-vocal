@@ -17,15 +17,9 @@
 //
 //   themeToggleButton.onClick = [this]
 //   {
-//       lookAndFeel.setDarkMode (! lookAndFeel.isDarkMode());
+//       lookAndFeel.toggleTheme(); // 互換用メソッド
 //       repaint();
 //   };
-//
-// 注意: PianoRollComponent / GraphEditorComponent は
-// getLookAndFeel().findColour(VoseColourIds::...) を直接呼ぶ設計にしてある
-// （このLookAndFeelがコンポーネントツリーのどこかに設定されている前提）。
-// そのため、このLookAndFeelを使わずにこれらのコンポーネントを単体利用すると
-// 色解決に失敗する点に注意（README参照）。
 
 #pragma once
 
@@ -35,6 +29,16 @@
 class VoseLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
+    // --- 【ブリッジ用】他コンポーネントが直接アクセスするテーマ定義 ---
+    enum class Theme { Dark, Light };
+
+    // --- 【ブリッジ用】直接アクセスされるカラーメンバ変数 ---
+    juce::Colour colourBackground;
+    juce::Colour colourSurface;
+    juce::Colour colourAccent;
+    juce::Colour colourText;
+    juce::Colour colourTextDim;
+
     explicit VoseLookAndFeel (bool startInDarkMode = true)
     {
         setDarkMode (startInDarkMode);
@@ -45,9 +49,20 @@ public:
         darkMode = dark;
         setColourScheme (dark ? buildDarkColourScheme() : buildLightColourScheme());
         registerCustomColours (dark);
+
+        // --- 【ブリッジ用】直接参照メンバ変数への同期処理 ---
+        colourBackground = findColour (VoseColourIds::canvasBackground);
+        colourSurface    = findColour (VoseColourIds::galleryCardBackground);
+        colourAccent     = findColour (VoseColourIds::accentPrimary);
+        colourText       = dark ? juce::Colour (0xfff5f5f7) : juce::Colour (0xff1c1c1e);
+        colourTextDim    = colourText.withAlpha (0.6f);
     }
 
     bool isDarkMode() const { return darkMode; }
+
+    // --- 【ブリッジ用】他コンポーネントが呼び出すメソッド群 ---
+    Theme getTheme() const { return darkMode ? Theme::Dark : Theme::Light; }
+    void toggleTheme() { setDarkMode (!darkMode); }
 
 private:
     bool darkMode = true;
