@@ -98,11 +98,11 @@ private:
         auto bounds = juce::Rectangle<int> (0, 0, width, height).reduced (8, 4);
 
         g.setColour (text);
-        g.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        g.setFont (juce::Font (14.0f, juce::Font::bold));
         g.drawFittedText (c.name, bounds.removeFromTop (height / 2), juce::Justification::centredLeft, 1);
 
         g.setColour (c.hasOto ? textDim : juce::Colours::orangered);
-        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+        g.setFont (juce::Font (11.0f));
         g.drawFittedText (c.hasOto ? "oto.ini 検出済み" : "oto.ini が見つかりません",
                            bounds, juce::Justification::centredLeft, 1);
     }
