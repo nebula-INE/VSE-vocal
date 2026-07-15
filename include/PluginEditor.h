@@ -1,34 +1,26 @@
 // PluginEditor.h
-//
-// [フェーズ3 差分]
-//   - 上部: ピアノロール（PianoRollComponent）
-//   - 中段: グラフエディタ（GraphEditorComponent, Pitch/Gender/Tension/Breath）
-//   - その下: 音源ブラウザ（VoiceGalleryComponent, ボイスギャラリー）+ テーマ切替
-//   - 最下部: 既存のデバッグ用パネル（スライダー/歌詞キュー/UST読み込みボタン等）
-// という4段構成にした。VoseLookAndFeelでダーク/ライトのテーマ切り替えに対応。
+// フェーズ4 PoC: タブ構成（コントロール / ピアノロール / グラフエディタ / 音源ブラウザ / ミキサー）
+// + ダーク/ライトテーマ切り替え + buffer_ms調整 + ホスト同期トグル + UST書き出し。
 
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
+#include "VoseLookAndFeel.h"
 #include "PianoRollComponent.h"
-#include "PianoRollBridge.h"
 #include "GraphEditorComponent.h"
 #include "VoiceGalleryComponent.h"
-#include "VoseLookAndFeel.h"
-#include <unordered_map>
-#include <array>
+#include "TrackMixerComponent.h"
 
-class VoseAudioProcessorEditor : public juce::AudioProcessorEditor
+// ------------------------------------------------------------------
+// ControlsPanel: デバッグ用の生パラメータ調整パネル。
+// フェーズ4でbuffer_ms調整・ホスト同期トグル・UST書き出しを追加。
+// ------------------------------------------------------------------
+class ControlsPanel : public juce::Component
 {
 public:
-    explicit VoseAudioProcessorEditor (VoseAudioProcessor& p)
-        : juce::AudioProcessorEditor (&p), processor (p)
+    explicit ControlsPanel (VoseAudioProcessor& p) : processor (p)
     {
-        // [フェーズ3] テーマ。エディタが破棄されるまでこのLookAndFeelが
-        // コンポーネントツリー全体（子コンポーネント含む）に適用される。
-        setLookAndFeel (&lookAndFeel);
-
         setupSlider (genderSlider, genderAttach, "gender");
         setupSlider (tensionSlider, tensionAttach, "tension");
         setupSlider (breathSlider, breathAttach, "breath");
@@ -43,7 +35,7 @@ public:
         loadVoiceButton.onClick = [this]
         {
             fileChooser = std::make_unique<juce::FileChooser> (
-                "音源フォルダを選択 (oto.iniを含むフォルダ)",
+                "音源フォルダを選択 (oto.iniを含むフォルダ、トラック1に読み込みます)",
                 juce::File::getSpecialLocation (juce::File::userHomeDirectory));
 
             fileChooser->launchAsync (juce::FileBrowserComponent::canSelectDirectories,
@@ -52,15 +44,13 @@ public:
                 auto dir = fc.getResult();
                 if (dir.isDirectory())
                 {
-                    processor.loadVoiceDirectory (dir);
-                    voiceGallery.setSelectedByName (dir.getFileName());
+                    processor.loadVoiceDirectory (dir); // トラック0
                     updateStatusLabel();
                 }
             });
         };
         addAndMakeVisible (loadVoiceButton);
         addAndMakeVisible (statusLabel);
-        updateStatusLabel();
 
         loadUstButton.onClick = [this]
         {
@@ -75,187 +65,105 @@ public:
                 if (f.existsAsFile())
                 {
                     processor.loadUstFile (f);
-                    refreshPianoRollFromProcessor();
-                    refreshGraphEditorFromProcessor();
                     updateStatusLabel();
+                    if (onUstLoaded)
+                        onUstLoaded();
                 }
             });
         };
         addAndMakeVisible (loadUstButton);
+
+        exportUstButton.onClick = [this]
+        {
+            exportFileChooser = std::make_unique<juce::FileChooser> (
+                "書き出し先を選択", juce::File::getSpecialLocation (juce::File::userHomeDirectory)
+                                          .getChildFile (processor.getProjectName() + ".ust"),
+                "*.ust");
+
+            exportFileChooser->launchAsync (juce::FileBrowserComponent::saveMode,
+                                             [this] (const juce::FileChooser& fc)
+            {
+                auto f = fc.getResult();
+                if (f != juce::File())
+                {
+                    const bool ok = processor.exportToUstFile (f);
+                    statusLabel.setText (ok ? ("書き出し成功: " + f.getFullPathName())
+                                             : "書き出し失敗（ノートが無いか、書き込みエラー）",
+                                          juce::dontSendNotification);
+                }
+            });
+        };
+        addAndMakeVisible (exportUstButton);
 
         playButton.onClick = [this] { processor.startSongPlayback(); };
         stopButton.onClick = [this] { processor.stopSongPlayback(); };
         addAndMakeVisible (playButton);
         addAndMakeVisible (stopButton);
 
-        // --- [フェーズ3] ピアノロール ---
-        pianoRollViewport.setViewedComponent (&pianoRoll, false);
-        pianoRollViewport.setScrollBarsShown (true, true);
-        addAndMakeVisible (pianoRollViewport);
+        // --- buffer_ms調整 ---
+        bufferMsSlider.setRange ((double) VoseAudioProcessor::kMinBufferMs,
+                                  (double) VoseAudioProcessor::kMaxBufferMs, 10.0);
+        bufferMsSlider.setValue (processor.getActiveBufferMs(), juce::dontSendNotification);
+        bufferMsSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+        bufferMsSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 60, 20);
+        bufferMsSlider.setTooltip ("先読みバッファ量[ms]。大きいほど発音までの遅延は増えるが安定する。"
+                                    "変更時は瞬間的に音が途切れることがあります（低頻度の設定変更として許容）。");
+        bufferMsSlider.onValueChange = [this] { processor.requestBufferMs ((int) bufferMsSlider.getValue()); };
+        addAndMakeVisible (bufferMsLabel);
+        addAndMakeVisible (bufferMsSlider);
 
-        pianoRoll.onNotesChanged = [this] (const std::vector<PianoRollNote>& notes, double tempo)
+        // --- ホストトランスポート同期 ---
+        hostSyncButton.setClickingTogglesState (true);
+        hostSyncButton.setToggleState (processor.getSyncToHostTransport(), juce::dontSendNotification);
+        hostSyncButton.onClick = [this]
         {
-            auto scheduled = PianoRollBridge::toScheduledSongNotes (notes, &originalNoteMap);
-            processor.setSongNotesFromEditor (scheduled, tempo);
-            updateStatusLabel();
+            processor.setSyncToHostTransport (hostSyncButton.getToggleState());
+            playButton.setEnabled (! hostSyncButton.getToggleState());
+            stopButton.setEnabled (! hostSyncButton.getToggleState());
         };
-        pianoRoll.setPlayheadSecondsProvider ([this] { return processor.getSongPositionSeconds(); });
+        addAndMakeVisible (hostSyncButton);
 
-        // --- [フェーズ3] グラフエディタ ---
-        for (size_t i = 0; i < kModes.size(); ++i)
-        {
-            auto& button = modeButtons[i];
-            button.setButtonText (kModeNames[i]);
-            button.setRadioGroupId (0x6706);
-            button.setClickingTogglesState (true);
-            button.setColour (juce::TextButton::buttonOnColourId, colourForModeButton (kModes[i]));
-            button.onClick = [this, i] { graphEditor.setMode (kModes[i]); };
-            addAndMakeVisible (button);
-        }
-        modeButtons[0].setToggleState (true, juce::dontSendNotification);
-
-        penModeToggle.setButtonText ("Pen");
-        penModeToggle.onClick = [this] { graphEditor.setPenMode (penModeToggle.getToggleState()); };
-        addAndMakeVisible (penModeToggle);
-
-        graphEditorViewport.setViewedComponent (&graphEditor, false);
-        graphEditorViewport.setScrollBarsShown (false, true);
-        addAndMakeVisible (graphEditorViewport);
-
-        graphEditor.onCurvesChanged = [this] (const AutomationCurves& curves)
-        {
-            processor.setAutomationFromEditor (curves);
-        };
-        graphEditor.setPlayheadSecondsProvider ([this] { return processor.getSongPositionSeconds(); });
-
-        // --- [フェーズ3] 音源ブラウザ（ボイスギャラリー） ---
-        rescanVoicesButton.setButtonText ("音源を再スキャン");
-        rescanVoicesButton.onClick = [this] { voiceGallery.rescan(); };
-        addAndMakeVisible (rescanVoicesButton);
-
-        themeToggleButton.setButtonText (lookAndFeel.isDarkMode() ? "Light" : "Dark");
-        themeToggleButton.onClick = [this]
-        {
-            const bool newDark = ! lookAndFeel.isDarkMode();
-            lookAndFeel.setDarkMode (newDark);
-            themeToggleButton.setButtonText (newDark ? "Light" : "Dark");
-            repaint();
-        };
-        addAndMakeVisible (themeToggleButton);
-
-        voiceGalleryViewport.setViewedComponent (&voiceGallery, false);
-        voiceGalleryViewport.setScrollBarsShown (false, true);
-        addAndMakeVisible (voiceGalleryViewport);
-
-        voiceGallery.onVoiceSelected = [this] (const VoiceInfo& info)
-        {
-            if (info.isEmbedded)
-            {
-                // TODO: コアDLLへの内蔵音源登録(register_all_embedded_voices)呼び出しが
-                // PluginProcessor側にまだ配線されていない。ビルドパイプライン側の
-                // コード生成（GeneratedVoices.h相当）と繋ぎ込む必要がある。
-                statusLabel.setText ("内蔵音源への切り替えは未実装です（TODO）",
-                                     juce::dontSendNotification);
-                return;
-            }
-            processor.loadVoiceDirectory (info.directory);
-            updateStatusLabel();
-        };
-        voiceGallery.rescan();
-
-        refreshPianoRollFromProcessor();
-        refreshGraphEditorFromProcessor();
-
-        setSize (900, 980);
-    }
-
-    ~VoseAudioProcessorEditor() override
-    {
-        setLookAndFeel (nullptr); // JUCEの規約: LookAndFeelを外してから破棄する
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
-        g.setColour (getLookAndFeel().findColour (juce::Label::textColourId));
-        g.drawFittedText ("VO-SE (Phase 3: Piano Roll / Graph Editor / Voice Gallery)",
-                           getLocalBounds().removeFromTop (24), juce::Justification::centred, 1);
+        updateStatusLabel();
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().withTrimmedTop (24);
+        auto area = getLocalBounds().reduced (16);
+        genderSlider.setBounds (area.removeFromTop (32));
+        tensionSlider.setBounds (area.removeFromTop (32));
+        breathSlider.setBounds (area.removeFromTop (32));
 
-        auto pianoRollArea = area.removeFromTop (area.getHeight() - kDebugPanelHeight
-                                                  - kGraphEditorHeight - kGalleryAreaHeight);
-        pianoRollViewport.setBounds (pianoRollArea.reduced (4));
-
-        auto graphArea = area.removeFromTop (kGraphEditorHeight);
-        auto graphToolbar = graphArea.removeFromTop (28);
-        for (auto& button : modeButtons)
-        {
-            button.setBounds (graphToolbar.removeFromLeft (70));
-            graphToolbar.removeFromLeft (4);
-        }
-        graphToolbar.removeFromLeft (10);
-        penModeToggle.setBounds (graphToolbar.removeFromLeft (60));
-
-        graphEditorViewport.setBounds (graphArea.reduced (4, 2));
-        graphEditor.setViewHeight (graphEditorViewport.getHeight());
-
-        auto galleryArea = area.removeFromTop (kGalleryAreaHeight);
-        auto galleryToolbar = galleryArea.removeFromTop (28);
-        rescanVoicesButton.setBounds (galleryToolbar.removeFromLeft (140));
-        galleryToolbar.removeFromLeft (8);
-        themeToggleButton.setBounds (galleryToolbar.removeFromLeft (90));
-        voiceGalleryViewport.setBounds (galleryArea.reduced (4, 2));
-        voiceGallery.setSize (voiceGallery.getWidth(), voiceGalleryViewport.getHeight());
-
-        auto debugArea = area.reduced (20, 8);
-        genderSlider.setBounds (debugArea.removeFromTop (28));
-        tensionSlider.setBounds (debugArea.removeFromTop (28));
-        breathSlider.setBounds (debugArea.removeFromTop (28));
-
-        debugArea.removeFromTop (6);
-        auto lyricRow = debugArea.removeFromTop (26);
+        area.removeFromTop (6);
+        auto lyricRow = area.removeFromTop (26);
         lyricSequenceBox.setBounds (lyricRow.removeFromLeft (200));
         lyricRow.removeFromLeft (8);
-        loadVoiceButton.setBounds (lyricRow.removeFromLeft (160));
-        lyricRow.removeFromLeft (8);
-        statusLabel.setBounds (lyricRow);
+        loadVoiceButton.setBounds (lyricRow);
 
-        debugArea.removeFromTop (6);
-        auto ustRow = debugArea.removeFromTop (26);
-        loadUstButton.setBounds (ustRow.removeFromLeft (140));
-        ustRow.removeFromLeft (8);
-        playButton.setBounds (ustRow.removeFromLeft (70));
-        ustRow.removeFromLeft (8);
-        stopButton.setBounds (ustRow.removeFromLeft (70));
+        area.removeFromTop (6);
+        statusLabel.setBounds (area.removeFromTop (36));
+
+        area.removeFromTop (6);
+        auto ustRow = area.removeFromTop (26);
+        loadUstButton.setBounds (ustRow.removeFromLeft (110));
+        ustRow.removeFromLeft (6);
+        exportUstButton.setBounds (ustRow.removeFromLeft (110));
+        ustRow.removeFromLeft (6);
+        playButton.setBounds (ustRow.removeFromLeft (60));
+        ustRow.removeFromLeft (6);
+        stopButton.setBounds (ustRow.removeFromLeft (60));
+        ustRow.removeFromLeft (6);
+        hostSyncButton.setBounds (ustRow);
+
+        area.removeFromTop (10);
+        auto bufRow = area.removeFromTop (26);
+        bufferMsLabel.setBounds (bufRow.removeFromLeft (110));
+        bufferMsSlider.setBounds (bufRow);
     }
+
+    std::function<void()> onUstLoaded;
 
 private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
-
-    static constexpr int kDebugPanelHeight = 140;
-    static constexpr int kGraphEditorHeight = 200;
-    static constexpr int kGalleryAreaHeight = 138;
-
-    static inline const std::array<AutomationParam, 4> kModes {
-        AutomationParam::pitch, AutomationParam::gender, AutomationParam::tension, AutomationParam::breath
-    };
-    static inline const std::array<const char*, 4> kModeNames { "Pitch", "Gender", "Tension", "Breath" };
-
-    static juce::Colour colourForModeButton (AutomationParam p)
-    {
-        switch (p)
-        {
-            case AutomationParam::pitch:   return juce::Colour (0xff00ff7f);
-            case AutomationParam::gender:  return juce::Colour (0xffe74c3c);
-            case AutomationParam::tension: return juce::Colour (0xff2ecc71);
-            case AutomationParam::breath:  return juce::Colour (0xfff1c40f);
-        }
-        return juce::Colours::grey;
-    }
 
     void setupSlider (juce::Slider& slider, std::unique_ptr<SliderAttachment>& attach,
                        const juce::String& paramId)
@@ -269,30 +177,13 @@ private:
     void updateStatusLabel()
     {
         statusLabel.setText (
-            "読み込み済みalias数: " + juce::String (processor.getLoadedAliasCount())
+            "トラック1 alias数: " + juce::String (processor.getLoadedAliasCount (0))
                 + " / USTノート数: " + juce::String (processor.getLoadedSongNoteCount())
                 + "\nMIDI Lyricメタイベントがあれば優先、無ければ上の歌詞シーケンスをローテーション消費",
             juce::dontSendNotification);
     }
 
-    void refreshPianoRollFromProcessor()
-    {
-        auto snapshot = processor.getSongNotesSnapshot();
-        originalNoteMap = PianoRollBridge::buildOriginalIdMap (snapshot);
-
-        pianoRoll.setTempo (processor.getSongTempo());
-        pianoRoll.setNotes (PianoRollBridge::fromScheduledSongNotes (snapshot));
-    }
-
-    void refreshGraphEditorFromProcessor()
-    {
-        graphEditor.setTempo (processor.getSongTempo());
-        graphEditor.setCurves (processor.getAutomationSnapshot());
-    }
-
     VoseAudioProcessor& processor;
-    VoseLookAndFeel lookAndFeel { true }; // [フェーズ3] ダークモードで開始
-
     juce::Slider genderSlider, tensionSlider, breathSlider;
     std::unique_ptr<SliderAttachment> genderAttach, tensionAttach, breathAttach;
 
@@ -302,22 +193,132 @@ private:
     std::unique_ptr<juce::FileChooser> fileChooser;
 
     juce::TextButton loadUstButton { "USTを開く..." };
+    juce::TextButton exportUstButton { "USTを書き出す..." };
     juce::TextButton playButton { "再生" };
     juce::TextButton stopButton { "停止" };
+    juce::TextButton hostSyncButton { "ホスト同期" };
     std::unique_ptr<juce::FileChooser> ustFileChooser;
+    std::unique_ptr<juce::FileChooser> exportFileChooser;
 
-    juce::Viewport pianoRollViewport;
-    PianoRollComponent pianoRoll;
-    std::unordered_map<int64_t, ScheduledSongNote> originalNoteMap;
+    juce::Label bufferMsLabel { "bufLabel", "先読みバッファ(ms)" };
+    juce::Slider bufferMsSlider;
+};
 
-    std::array<juce::TextButton, 4> modeButtons;
-    juce::ToggleButton penModeToggle;
-    juce::Viewport graphEditorViewport;
+// ------------------------------------------------------------------
+// GraphEditorTab: モード切替タブ(Gender/Tension/Breath) + GraphEditorComponent本体
+// ------------------------------------------------------------------
+class GraphEditorTab : public juce::Component
+{
+public:
+    explicit GraphEditorTab (PianoRollComponent& roll) : graphEditor (roll)
+    {
+        for (auto* b : { &genderTab, &tensionTab, &breathTab })
+        {
+            b->setClickingTogglesState (true);
+            addAndMakeVisible (b);
+        }
+        genderTab.setRadioGroupId (1);
+        tensionTab.setRadioGroupId (1);
+        breathTab.setRadioGroupId (1);
+        genderTab.setToggleState (true, juce::dontSendNotification);
+
+        genderTab.onClick  = [this] { graphEditor.setMode (GraphEditorComponent::Mode::Gender); };
+        tensionTab.onClick = [this] { graphEditor.setMode (GraphEditorComponent::Mode::Tension); };
+        breathTab.onClick  = [this] { graphEditor.setMode (GraphEditorComponent::Mode::Breath); };
+
+        addAndMakeVisible (graphEditor);
+    }
+
+    void setLookAndFeelRef (VoseLookAndFeel* lf) { graphEditor.setLookAndFeelRef (lf); }
+
+    void resized() override
+    {
+        auto area = getLocalBounds();
+        auto tabRow = area.removeFromTop (28);
+        const int w = tabRow.getWidth() / 3;
+        genderTab.setBounds (tabRow.removeFromLeft (w));
+        tensionTab.setBounds (tabRow.removeFromLeft (w));
+        breathTab.setBounds (tabRow);
+        graphEditor.setBounds (area);
+    }
+
+private:
+    juce::TextButton genderTab { "Gender" }, tensionTab { "Tension" }, breathTab { "Breath" };
     GraphEditorComponent graphEditor;
+};
 
-    // [フェーズ3] 音源ブラウザ + テーマ切替
-    juce::TextButton rescanVoicesButton;
-    juce::TextButton themeToggleButton;
-    juce::Viewport voiceGalleryViewport;
+// ------------------------------------------------------------------
+// VoseAudioProcessorEditor: トップレベル。タブ構成 + テーマ切替。
+// ------------------------------------------------------------------
+class VoseAudioProcessorEditor : public juce::AudioProcessorEditor
+{
+public:
+    explicit VoseAudioProcessorEditor (VoseAudioProcessor& p)
+        : juce::AudioProcessorEditor (&p), processor (p),
+          pianoRoll (p), graphEditorTab (pianoRoll), voiceGallery (p), trackMixer (p)
+    {
+        setLookAndFeel (&lookAndFeel);
+
+        themeToggleButton.onClick = [this]
+        {
+            lookAndFeel.toggleTheme();
+            applyThemeToChildren();
+        };
+        addAndMakeVisible (themeToggleButton);
+
+        controls.onUstLoaded = [this] { pianoRoll.loadFromProcessor(); };
+        voiceGallery.onVoiceLoaded = [this] { /* 将来: トラック名表示の更新等 */ };
+
+        tabs.addTab ("コントロール", juce::Colours::transparentBlack, &controls, false);
+        tabs.addTab ("ピアノロール", juce::Colours::transparentBlack, &pianoRoll, false);
+        tabs.addTab ("グラフエディタ", juce::Colours::transparentBlack, &graphEditorTab, false);
+        tabs.addTab ("音源ブラウザ", juce::Colours::transparentBlack, &voiceGallery, false);
+        tabs.addTab ("ミキサー", juce::Colours::transparentBlack, &trackMixer, false);
+        addAndMakeVisible (tabs);
+
+        applyThemeToChildren();
+        setSize (760, 520);
+    }
+
+    ~VoseAudioProcessorEditor() override { setLookAndFeel (nullptr); }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (lookAndFeel.colourBackground);
+        g.setColour (lookAndFeel.colourText);
+        g.setFont (juce::Font (juce::FontOptions (16.0f, juce::Font::bold)));
+        g.drawFittedText ("VO-SE (Phase 4 PoC)", getLocalBounds().removeFromTop (30).reduced (8, 0),
+                           juce::Justification::centredLeft, 1);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds();
+        auto topRow = area.removeFromTop (30);
+        themeToggleButton.setBounds (topRow.removeFromRight (110).reduced (4));
+        tabs.setBounds (area);
+    }
+
+private:
+    void applyThemeToChildren()
+    {
+        pianoRoll.setLookAndFeelRef (&lookAndFeel);
+        graphEditorTab.setLookAndFeelRef (&lookAndFeel);
+        voiceGallery.setLookAndFeelRef (&lookAndFeel);
+        trackMixer.setLookAndFeelRef (&lookAndFeel);
+        themeToggleButton.setButtonText (
+            lookAndFeel.getTheme() == VoseLookAndFeel::Theme::Dark ? "ライトに切替" : "ダークに切替");
+        repaint();
+    }
+
+    VoseAudioProcessor& processor;
+    VoseLookAndFeel lookAndFeel;
+    juce::TextButton themeToggleButton { "ライトに切替" };
+
+    juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
+    ControlsPanel controls { processor };
+    PianoRollComponent pianoRoll;
+    GraphEditorTab graphEditorTab;
     VoiceGalleryComponent voiceGallery;
+    TrackMixerComponent trackMixer;
 };
