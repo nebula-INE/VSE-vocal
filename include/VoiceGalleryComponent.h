@@ -1,176 +1,155 @@
 // VoiceGalleryComponent.h
 //
-// フェーズ3「音源ブラウザ（ボイスギャラリー）の統合」。
-// modules/gui/widgets.py の VoiceCardWidget と
-// modules/gui/mixins/voice_management_mixin.py の update_voice_list() /
-// on_voice_selected() をJUCEネイティブで再実装したもの。
+// modules/gui/main_window.py の VoiceCardGallery 相当。
+// 「音源フォルダの中にある各ボイスバンクのフォルダをカード状に並べて
+// クリックで切り替える」というUXをJUCEネイティブで実装したもの
+// （VoiceCardGalleryの実ソースは未確認のため、想定される一般的なUXから
+// 新規実装している）。
 //
-// Python版との違い:
-//   - アイコン画像は扱わず、名前から決定的に生成したアクセントカラーの
-//     スウォッチで代替している（icon.pngの読み込み・キャッシュ管理は
-//     このフェーズのスコープ外とした簡略化）。
-//   - プラグインエディタの限られた縦幅に収まるよう、3列グリッドではなく
-//     横一列（Viewportで横スクロール）のレイアウトにしている。
-//
-// 使い方（PluginEditor.h側）:
-//   voiceGalleryViewport.setViewedComponent (&voiceGallery, false);
-//   voiceGalleryViewport.setScrollBarsShown (false, true);
-//   voiceGallery.onVoiceSelected = [this] (const VoiceInfo& info)
-//   {
-//       if (info.isEmbedded)
-//           ; // TODO: 内蔵音源に切り替えるAPIをVoseAudioProcessorに追加する必要がある
-//       else
-//           processor.loadVoiceDirectory (info.directory);
-//   };
-//   voiceGallery.rescan();
+// 【意図的な簡略化】カバー画像・詳細情報（音源説明文等）の表示は無し。
+// フォルダ名と oto.ini の有無のみを表示するシンプルなリスト形式。
 
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
-#include "VoiceInfo.h"
-#include "VoiceScanner.h"
-#include "VoseColourIds.h"
-#include <vector>
-#include <memory>
-#include <functional>
+#include "PluginProcessor.h"
+#include "VoseLookAndFeel.h"
 
-// 1枚のボイスカード。VoiceCardWidget(QFrame)相当。
-class VoiceCardComponent : public juce::Component
+class VoiceGalleryComponent : public juce::Component,
+                               private juce::ListBoxModel
 {
 public:
-    VoiceCardComponent (VoiceInfo infoIn, juce::Colour accentIn)
-        : info (std::move (infoIn)), accentColour (accentIn)
+    explicit VoiceGalleryComponent (VoseAudioProcessor& p) : processor (p)
     {
-        setMouseCursor (juce::MouseCursor::PointingHandCursor);
-    }
+        addAndMakeVisible (rootLabel);
+        rootLabel.setJustificationType (juce::Justification::centredLeft);
 
-    void setSelected (bool s) { if (selected != s) { selected = s; repaint(); } }
-    bool isSelected() const { return selected; }
-    const VoiceInfo& getInfo() const { return info; }
+        for (int i = 0; i < VoseAudioProcessor::kMaxTracks; ++i)
+            trackSelector.addItem ("トラック " + juce::String (i + 1), i + 1);
+        trackSelector.setSelectedId (1, juce::dontSendNotification);
+        addAndMakeVisible (trackSelector);
 
-    std::function<void()> onClicked;
-
-    void paint (juce::Graphics& g) override
-    {
-        auto& lf = getLookAndFeel();
-        auto bounds = getLocalBounds().toFloat().reduced (2.0f);
-
-        const auto cardBg = lf.findColour (VoseColourIds::galleryCardBackground);
-        const auto borderCol = selected ? accentColour : lf.findColour (VoseColourIds::galleryCardBorder);
-        const float borderWidth = selected ? 2.0f : 1.0f;
-        const float bgAlpha = selected ? 0.9f : 0.6f;
-
-        g.setColour (cardBg.withAlpha (bgAlpha));
-        g.fillRoundedRectangle (bounds, 10.0f);
-        g.setColour (borderCol);
-        g.drawRoundedRectangle (bounds, 10.0f, borderWidth);
-
-        // アイコン代わりのアクセントカラー・スウォッチ
-        auto swatchArea = bounds.reduced (14.0f);
-        swatchArea = swatchArea.removeFromTop (swatchArea.getHeight() * 0.55f);
-        const float swatchSize = juce::jmin (swatchArea.getWidth(), swatchArea.getHeight());
-        juce::Rectangle<float> swatch (0, 0, swatchSize, swatchSize);
-        swatch.setCentre (swatchArea.getCentre());
-        g.setColour (accentColour);
-        g.fillEllipse (swatch);
-
-        if (info.isEmbedded)
+        chooseRootButton.onClick = [this]
         {
-            g.setColour (juce::Colours::white);
-            g.setFont (juce::Font (14.0f, juce::Font::bold));
-            g.drawFittedText ("★", swatch.toNearestInt(), juce::Justification::centred, 1);
-        }
+            chooser = std::make_unique<juce::FileChooser> (
+                "音源フォルダの親ディレクトリを選択（複数ボイスバンクをまとめて表示）",
+                juce::File::getSpecialLocation (juce::File::userHomeDirectory));
 
-        // 名前ラベル
-        g.setColour (lf.findColour (juce::Label::textColourId));
-        g.setFont (11.0f);
-        auto labelArea = bounds.reduced (6.0f, 2.0f).removeFromBottom (bounds.getHeight() * 0.32f);
-        g.drawFittedText (info.name, labelArea.toNearestInt(), juce::Justification::centred, 2);
+            chooser->launchAsync (juce::FileBrowserComponent::canSelectDirectories,
+                                   [this] (const juce::FileChooser& fc)
+            {
+                auto dir = fc.getResult();
+                if (dir.isDirectory())
+                {
+                    rootDir = dir;
+                    rootLabel.setText (dir.getFullPathName(), juce::dontSendNotification);
+                    rescan();
+                }
+            });
+        };
+        addAndMakeVisible (chooseRootButton);
+
+        addAndMakeVisible (listBox);
+        listBox.setModel (this);
+        listBox.setRowHeight (36);
     }
 
-    void mouseUp (const juce::MouseEvent& event) override
+    void setLookAndFeelRef (VoseLookAndFeel* lf)
     {
-        if (event.mods.isLeftButtonDown() && getLocalBounds().contains (event.getPosition()))
-            if (onClicked != nullptr)
-                onClicked();
-    }
-
-private:
-    VoiceInfo info;
-    juce::Colour accentColour;
-    bool selected = false;
-};
-
-// カード一覧（横一列、Viewportで横スクロールする前提）。
-class VoiceGalleryComponent : public juce::Component
-{
-public:
-    VoiceGalleryComponent() = default;
-
-    // OS標準の音源フォルダ + voice_banks を再スキャンしてカードを作り直す。
-    void rescan()
-    {
-        rebuildCards (VoiceScanner::scanInstalledVoices());
-    }
-
-    void setSelectedByName (const juce::String& name)
-    {
-        for (auto& card : cards)
-            card->setSelected (card->getInfo().name == name);
+        vlf = lf;
+        listBox.setColour (juce::ListBox::backgroundColourId,
+                            vlf ? vlf->colourBackground : juce::Colours::black);
         repaint();
     }
 
-    std::function<void (const VoiceInfo&)> onVoiceSelected;
-
     void resized() override
     {
-        int x = kCardSpacing;
-        for (auto& card : cards)
-        {
-            card->setBounds (x, 0, kCardWidth, getHeight());
-            x += kCardWidth + kCardSpacing;
-        }
+        auto area = getLocalBounds().reduced (8);
+        auto topRow = area.removeFromTop (28);
+        chooseRootButton.setBounds (topRow.removeFromLeft (140));
+        topRow.removeFromLeft (8);
+        trackSelector.setBounds (topRow.removeFromLeft (110));
+        topRow.removeFromLeft (8);
+        rootLabel.setBounds (topRow);
+
+        area.removeFromTop (8);
+        listBox.setBounds (area);
     }
+
+    std::function<void()> onVoiceLoaded; // ステータス表示更新等のフック
 
 private:
-    static constexpr int kCardWidth = 96;
-    static constexpr int kCardSpacing = 8;
+    // --- juce::ListBoxModel ---
+    int getNumRows() override { return (int) cards.size(); }
 
-    static juce::Colour accentColourForName (const VoiceInfo& info)
+    void paintListBoxItem (int rowNumber, juce::Graphics& g, int width, int height, bool rowIsSelected) override
     {
-        if (info.isEmbedded)
-            return juce::Colour (0xff0a84ff); // 内蔵音源は常に固定のアクセント色（VoseLookAndFeelのaccent系に近い値）
+        if (rowNumber < 0 || rowNumber >= (int) cards.size())
+            return;
 
-        const float hue = (float) (((uint32_t) info.name.hashCode()) % 360u) / 360.0f;
-        return juce::Colour::fromHSV (hue, 0.55f, 0.85f, 1.0f);
+        const auto surface = vlf ? vlf->colourSurface : juce::Colours::darkgrey;
+        const auto accent  = vlf ? vlf->colourAccent : juce::Colours::cyan;
+        const auto text    = vlf ? vlf->colourText : juce::Colours::white;
+        const auto textDim = vlf ? vlf->colourTextDim : juce::Colours::grey;
+
+        g.fillAll (rowIsSelected ? accent.withAlpha (0.25f) : surface);
+
+        const auto& c = cards[(size_t) rowNumber];
+        auto bounds = juce::Rectangle<int> (0, 0, width, height).reduced (8, 4);
+
+        g.setColour (text);
+        g.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        g.drawFittedText (c.name, bounds.removeFromTop (height / 2), juce::Justification::centredLeft, 1);
+
+        g.setColour (c.hasOto ? textDim : juce::Colours::orangered);
+        g.setFont (juce::Font (juce::FontOptions (11.0f)));
+        g.drawFittedText (c.hasOto ? "oto.ini 検出済み" : "oto.ini が見つかりません",
+                           bounds, juce::Justification::centredLeft, 1);
     }
 
-    void rebuildCards (std::vector<VoiceInfo> infos)
+    void listBoxItemClicked (int row, const juce::MouseEvent&) override
+    {
+        if (row < 0 || row >= (int) cards.size())
+            return;
+
+        const int trackIndex = trackSelector.getSelectedId() - 1;
+        processor.loadVoiceDirectory (cards[(size_t) row].folder, trackIndex);
+        if (onVoiceLoaded)
+            onVoiceLoaded();
+        repaint();
+    }
+
+    struct VoiceCard { juce::String name; juce::File folder; bool hasOto = false; };
+
+    void rescan()
     {
         cards.clear();
-        removeAllChildren();
-
-        for (auto& info : infos)
+        if (rootDir.isDirectory())
         {
-            auto card = std::make_unique<VoiceCardComponent> (info, accentColourForName (info));
-            auto* raw = card.get();
-            card->onClicked = [this, raw]
+            for (const auto& sub : rootDir.findChildFiles (juce::File::findDirectories, false))
             {
-                for (auto& c : cards)
-                    c->setSelected (c.get() == raw);
-                if (onVoiceSelected != nullptr)
-                    onVoiceSelected (raw->getInfo());
-            };
-            addAndMakeVisible (*card);
-            cards.push_back (std::move (card));
+                VoiceCard c;
+                c.name = sub.getFileName();
+                c.folder = sub;
+                c.hasOto = ! sub.findChildFiles (juce::File::findFiles, true, "oto.ini").isEmpty();
+                cards.push_back (std::move (c));
+            }
         }
-
-        setSize ((int) infos.size() * (kCardWidth + kCardSpacing) + kCardSpacing,
-                 getHeight() > 0 ? getHeight() : 100);
-        resized();
+        listBox.updateContent();
+        repaint();
     }
 
-    std::vector<std::unique_ptr<VoiceCardComponent>> cards;
+    VoseAudioProcessor& processor;
+    VoseLookAndFeel* vlf = nullptr;
+
+    juce::File rootDir;
+    juce::Label rootLabel { "root", "（音源フォルダの親ディレクトリ未選択）" };
+    juce::TextButton chooseRootButton { "ルートを選択..." };
+    juce::ComboBox trackSelector;
+    std::unique_ptr<juce::FileChooser> chooser;
+
+    juce::ListBox listBox { "voiceGallery" };
+    std::vector<VoiceCard> cards;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceGalleryComponent)
 };
