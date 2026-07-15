@@ -1,162 +1,322 @@
 // PianoRollComponent.h
 //
-// フェーズ3「ユーザーインターフェースの本格化」— ピアノロール／タイムライン。
-// modules/gui/timeline_widget.py（PySide6版、簡易パネルの参考実装）が持っていた
-// 機能をJUCEネイティブで再実装したもの:
-//   - グリッド表示（テンポに応じた拍/16分音符ライン）
-//   - ノートの追加（空白ダブルクリック）／削除（右クリック、Delete/Backspaceキー）
-//   - ノートの移動（ドラッグ）／リサイズ（左右端ドラッグ）
-//   - 複数選択（ラバーバンド選択、Shiftクリックでトグル、Ctrl/Cmd+Aで全選択）
-//   - 選択範囲ループ（上部ルーラーをドラッグ）
-//   - 歌詞インライン編集（ノートをダブルクリック）
-//   - 水平/垂直ズーム、再生ヘッド表示
+// modules/gui/timeline_widget.py の参考実装が手元に無かったため、
+// 同等のUX（ノートの追加/移動/リサイズ/削除、グリッド表示）を
+// JUCEネイティブで一から実装したもの（移植ではなく新規実装）。
 //
-// 設計方針:
-//   このコンポーネントは VoseAudioProcessor / ScheduledSongNote を一切知らない。
-//   PianoRollNote のリストだけを扱う自己完結コンポーネントとし、
-//   プロセッサとの同期は onNotesChanged コールバック経由で外側（PluginEditor）に
-//   委譲する。将来 graph_editor_widget.py 相当のカーブエディタや
-//   keyboard_sidebar_widget.py 相当の本格的な鍵盤サイドバーに差し替える際も、
-//   このコンポーネントの公開インタフェースは変えずに済むようにしてある。
+// 【意図的に省いた機能】Undo/Redo、選択範囲ループ、複数選択、
+// スナップ設定のUI（グリッドスナップは固定で有効）。
+// これらは今後必要に応じて追加する。
 //
-// 使い方（PluginEditor.h 側）:
-//   pianoRoll.setTempo (processor.getSongTempo());
-//   pianoRoll.setNotes (fromScheduledSongNotes (processor.getSongNotesSnapshot()));
-//   pianoRoll.onNotesChanged = [this] (const std::vector<PianoRollNote>& notes, double tempo)
-//   {
-//       processor.setSongNotesFromEditor (toScheduledSongNotes (notes), tempo);
-//   };
-//   pianoRoll.setPlayheadSecondsProvider ([this] { return processor.getSongPositionSeconds(); });
-//
-// 注意（既知の簡略化。将来の改善候補としてコメントで明示）:
-//   - 鍵盤サイドバー・時間ルーラーはスクロール内容と一体化しており、
-//     DAWにあるような「スクロールしても左端/上端に固定」の挙動にはなっていない。
-//     本格対応は2枚のViewportを同期させる構成が必要（今回はPoCスコープ外）。
-//   - ベロシティ編集UIは未実装（PianoRollNote::velocity は保持のみ）。
+// データモデルは「拍(beat)」単位で保持し、コミット時にテンポを使って
+// 秒単位のScheduledSongNoteへ変換してPluginProcessorへ渡す。
 
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
-#include "PianoRollNote.h"
-#include "VoseColourIds.h"
-#include <vector>
-#include <functional>
-#include <memory>
+#include "PluginProcessor.h"
+#include "VoseLookAndFeel.h"
 
-class PianoRollComponent : public juce::Component,
-                            private juce::Timer
+struct PianoRollNote
+{
+    double startBeat = 0.0;
+    double lengthBeats = 1.0;
+    int    noteNum = 60;
+    juce::String lyric { "a" };
+    juce::String flags;
+    juce::String pbs, pbw, pby;
+    std::optional<UstVibratoParams> vibrato;
+
+    // GraphEditorComponent が読み書きする。nullopt=未指定（Flags/APVTSにフォールバック）。
+    std::optional<double> genderOverride01;
+    std::optional<double> tensionOverride01;
+    std::optional<double> breathOverride01;
+};
+
+class PianoRollComponent : public juce::Component, private juce::Timer
 {
 public:
-    PianoRollComponent();
-    ~PianoRollComponent() override = default;
+    explicit PianoRollComponent (VoseAudioProcessor& p) : processor (p)
+    {
+        setWantsKeyboardFocus (true);
+        loadFromProcessor();
+        startTimerHz (30); // 再生カーソルの表示更新用
+    }
 
-    // --- 外部からのデータ設定 ---
-    void setNotes (std::vector<PianoRollNote> newNotes);
-    const std::vector<PianoRollNote>& getNotes() const { return notes; }
+    void setLookAndFeelRef (VoseLookAndFeel* lf) { vlf = lf; repaint(); }
 
-    void setTempo (double bpm);
-    double getTempo() const { return tempoBpm; }
+    // processor側の最新ノート列を取り込む（外部でUSTを読み込んだ直後などに呼ぶ）。
+    void loadFromProcessor()
+    {
+        const double tempo = juce::jmax (1.0, processor.getCurrentTempo());
+        auto snapshot = processor.getSongNotesSnapshot();
 
-    // 再生ヘッド位置（秒）を毎フレーム問い合わせるコールバック。nullptrなら非表示。
-    void setPlayheadSecondsProvider (std::function<double()> provider);
+        notes.clear();
+        for (const auto& sn : snapshot)
+        {
+            PianoRollNote n;
+            n.startBeat   = sn.startTimeSec * tempo / 60.0;
+            n.lengthBeats = juce::jmax (0.0625, sn.durationSec * tempo / 60.0);
+            n.noteNum     = sn.noteNum;
+            n.lyric       = sn.lyric;
+            n.flags       = sn.flags;
+            n.pbs = sn.pbs; n.pbw = sn.pbw; n.pby = sn.pby;
+            n.vibrato = sn.vibrato;
+            n.genderOverride01 = sn.genderOverride01;
+            n.tensionOverride01 = sn.tensionOverride01;
+            n.breathOverride01 = sn.breathOverride01;
+            notes.push_back (std::move (n));
+        }
+        repaint();
+    }
 
-    // ループ範囲。設定されていない場合は std::nullopt 相当（hasLoopRangeで判定）。
-    bool hasLoopRange() const { return loopRangeValid; }
-    double getLoopStartSeconds() const { return loopStartSec; }
-    double getLoopEndSeconds() const { return loopEndSec; }
-    void clearLoopRange();
+    // 編集結果をプロセッサへ反映する。
+    void commitToProcessor()
+    {
+        const double tempo = juce::jmax (1.0, processor.getCurrentTempo());
+        std::sort (notes.begin(), notes.end(),
+                   [] (const auto& a, const auto& b) { return a.startBeat < b.startBeat; });
 
-    // --- ズーム ---
-    void setHorizontalZoom (double newPixelsPerSecond);
-    void setVerticalZoom (double newPixelsPerRow);
+        std::vector<ScheduledSongNote> out;
+        out.reserve (notes.size());
+        for (const auto& n : notes)
+        {
+            ScheduledSongNote sn;
+            sn.startTimeSec = n.startBeat * 60.0 / tempo;
+            sn.durationSec  = n.lengthBeats * 60.0 / tempo;
+            sn.noteNum      = n.noteNum;
+            sn.lyric        = n.lyric;
+            sn.flags        = n.flags;
+            sn.pbs = n.pbs; sn.pbw = n.pbw; sn.pby = n.pby;
+            sn.vibrato = n.vibrato;
+            sn.genderOverride01 = n.genderOverride01;
+            sn.tensionOverride01 = n.tensionOverride01;
+            sn.breathOverride01 = n.breathOverride01;
+            out.push_back (std::move (sn));
+        }
+        processor.setEditedNotes (std::move (out));
+    }
 
-    // ノート内容が変化するたびに呼ばれる（追加/削除/移動/リサイズ/歌詞変更）。
-    // 呼び出し側（PluginEditor）はここでプロセッサ側のモデルを更新する。
-    std::function<void (const std::vector<PianoRollNote>&, double tempoBpm)> onNotesChanged;
+    // GraphEditorComponent が同じノート列を直接編集できるようにする
+    // （単一の情報源をPianoRollComponentが保持する設計）。
+    std::vector<PianoRollNote>& getNotesForEditing() { return notes; }
+    double getPixelsPerBeat() const { return pixelsPerBeat; }
+    double getScrollXBeats() const { return scrollXBeats; }
+    int getSelectedIndex() const { return selectedIndex; }
 
-    // --- juce::Component ---
-    void paint (juce::Graphics&) override;
-    void resized() override;
-    void mouseDown (const juce::MouseEvent&) override;
-    void mouseDrag (const juce::MouseEvent&) override;
-    void mouseUp (const juce::MouseEvent&) override;
-    void mouseMove (const juce::MouseEvent&) override;
-    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
-    bool keyPressed (const juce::KeyPress&) override;
+    void paint (juce::Graphics& g) override
+    {
+        const auto bg      = vlf ? vlf->colourBackground : juce::Colours::black;
+        const auto surface = vlf ? vlf->colourSurface : juce::Colours::darkgrey;
+        const auto border  = vlf ? vlf->colourBorder : juce::Colours::grey;
+        const auto accent  = vlf ? vlf->colourAccent : juce::Colours::cyan;
+
+        g.fillAll (bg);
+
+        // --- 鍵盤レーン（黒鍵行を少し暗く） ---
+        for (int n = lowestNote; n <= highestNote; ++n)
+        {
+            const auto rowY = noteNumToY (n);
+            const bool isBlackKey = juce::Array<int> { 1, 3, 6, 8, 10 }.contains (n % 12);
+            g.setColour (isBlackKey ? surface.darker (0.15f) : surface.darker (0.05f));
+            g.fillRect (0.0f, (float) rowY, (float) getWidth(), (float) rowHeight);
+        }
+
+        // --- 拍グリッド ---
+        g.setColour (border.withAlpha (0.5f));
+        const double startBeatVisible = scrollXBeats;
+        const double endBeatVisible   = scrollXBeats + getWidth() / pixelsPerBeat;
+        for (int beat = (int) std::floor (startBeatVisible); beat <= (int) std::ceil (endBeatVisible); ++beat)
+        {
+            const float x = (float) beatToX ((double) beat);
+            g.drawVerticalLine ((int) x, 0.0f, (float) getHeight());
+        }
+
+        // --- ノート描画 ---
+        for (size_t i = 0; i < notes.size(); ++i)
+        {
+            const auto& n = notes[i];
+            const auto r = noteBounds (n);
+            const bool selected = (int) i == selectedIndex;
+
+            g.setColour (selected ? accent : accent.withAlpha (0.75f));
+            g.fillRoundedRectangle (r, 3.0f);
+            g.setColour (border);
+            g.drawRoundedRectangle (r, 3.0f, 1.0f);
+
+            // 歌詞をノート内に描画（Phase3要件: 「表示するだけ」でよい）
+            g.setColour (juce::Colours::black.withAlpha (0.85f));
+            g.setFont (juce::Font (12.0f));
+            g.drawFittedText (n.lyric, r.getSmallestIntegerContainer().reduced (2),
+                               juce::Justification::centredLeft, 1);
+        }
+
+        // --- 再生カーソル ---
+        if (processor.isSongPlaying())
+        {
+            g.setColour (juce::Colours::red);
+            const float cursorX = (float) beatToX (playheadBeat);
+            g.drawVerticalLine ((int) cursorX, 0.0f, (float) getHeight());
+        }
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        grabKeyboardFocus();
+        const int idx = findNoteAt (e.position);
+
+        if (e.mods.isRightButtonDown())
+        {
+            if (idx >= 0) { notes.erase (notes.begin() + idx); selectedIndex = -1; commitToProcessor(); repaint(); }
+            return;
+        }
+
+        if (idx >= 0)
+        {
+            selectedIndex = idx;
+            const auto r = noteBounds (notes[(size_t) idx]);
+            const bool onRightEdge = e.position.x > r.getRight() - 6.0f;
+            dragMode = onRightEdge ? DragMode::Resize : DragMode::Move;
+            dragStartPos = e.position;
+            dragStartNote = notes[(size_t) idx];
+        }
+        else
+        {
+            // 空白クリック: 新規ノート追加（1拍長、グリッドスナップ）
+            PianoRollNote n;
+            n.startBeat   = snapToGrid (xToBeat (e.position.x));
+            n.lengthBeats = 1.0;
+            n.noteNum     = yToNoteNum (e.position.y);
+            n.lyric       = "a";
+            notes.push_back (n);
+            selectedIndex = (int) notes.size() - 1;
+            dragMode = DragMode::None;
+            commitToProcessor();
+        }
+        repaint();
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (selectedIndex < 0 || dragMode == DragMode::None)
+            return;
+
+        auto& n = notes[(size_t) selectedIndex];
+        const double deltaBeats = xToBeat (e.position.x) - xToBeat (dragStartPos.x);
+
+        if (dragMode == DragMode::Move)
+        {
+            n.startBeat = juce::jmax (0.0, snapToGrid (dragStartNote.startBeat + deltaBeats));
+            n.noteNum   = yToNoteNum (e.position.y);
+        }
+        else if (dragMode == DragMode::Resize)
+        {
+            n.lengthBeats = juce::jmax (0.0625, snapToGrid (dragStartNote.lengthBeats + deltaBeats));
+        }
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (dragMode != DragMode::None)
+            commitToProcessor();
+        dragMode = DragMode::None;
+    }
+
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        const int idx = findNoteAt (e.position);
+        if (idx >= 0)
+        {
+            // 歌詞のインライン編集（簡易: テキストエディタをポップアップ）
+            auto editor = std::make_unique<juce::TextEditor>();
+            auto* rawEditor = editor.get();
+            auto r = noteBounds (notes[(size_t) idx]).getSmallestIntegerContainer();
+            addAndMakeVisible (rawEditor);
+            rawEditor->setBounds (r);
+            rawEditor->setText (notes[(size_t) idx].lyric);
+            rawEditor->selectAll();
+            rawEditor->grabKeyboardFocus();
+
+            const int capturedIdx = idx;
+            rawEditor->onReturnKey = [this, capturedIdx, rawEditor]
+            {
+                if (capturedIdx < (int) notes.size())
+                    notes[(size_t) capturedIdx].lyric = rawEditor->getText();
+                commitToProcessor();
+                removeChildComponent (rawEditor);
+                repaint();
+            };
+            rawEditor->onFocusLost = rawEditor->onReturnKey;
+
+            // editorのunique_ptrはonReturnKey実行後もラムダのキャプチャが
+            // 生ポインタを使い終わるまで生存させる必要があるため、保持しておく。
+            heldEditors.push_back (std::move (editor));
+        }
+    }
+
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
+    {
+        scrollXBeats = juce::jmax (0.0, scrollXBeats - wheel.deltaX * 20.0);
+        pixelsPerBeat = juce::jlimit (10.0, 200.0, pixelsPerBeat * (1.0 + wheel.deltaY * 0.3));
+        repaint();
+    }
 
 private:
-    // --- ジオメトリ定数 ---
-    static constexpr int kLowestNote  = 24;  // C1
-    static constexpr int kHighestNote = 96;  // C7
-    static constexpr int kKeyboardWidth = 52;
-    static constexpr int kRulerHeight   = 22;
-    static constexpr int kEdgeGrabPx    = 6;
-    static constexpr double kMinNoteDurationSec = 0.05;
+    enum class DragMode { None, Move, Resize };
 
-    enum class DragMode
+    void timerCallback() override
     {
-        none,
-        moveNotes,
-        resizeLeft,
-        resizeRight,
-        rubberBand,
-        loopRange
-    };
+        if (processor.isSongPlaying())
+        {
+            // 簡易表示: processorから正確なサンプル位置をまだ公開していないため、
+            // 現状は再描画のトリガーのみ（TODO: 正確な再生位置をProcessor側に公開する）。
+            repaint();
+        }
+    }
 
-    // --- 座標変換 ---
-    double xToTimeSec (float x) const;
-    float  timeSecToX (double t) const;
-    int    yToNoteNumber (float y) const;
-    float  noteNumberToY (int noteNumber) const;
-    double snapTimeSec (double t) const;
-    double secondsPerBeat() const { return 60.0 / juce::jmax (1.0, tempoBpm); }
+    double beatToX (double beat) const { return (beat - scrollXBeats) * pixelsPerBeat + keyboardWidth; }
+    double xToBeat (double x) const { return (x - keyboardWidth) / pixelsPerBeat + scrollXBeats; }
+    double noteNumToY (int noteNum) const { return (highestNote - noteNum) * rowHeight; }
+    int    yToNoteNum (double y) const { return juce::jlimit (lowestNote, highestNote, highestNote - (int) (y / rowHeight)); }
+    double snapToGrid (double beats) const { return std::round (beats * 4.0) / 4.0; } // 16分音符スナップ
 
-    void recalculateContentSize();
-    void notifyChanged();
-
-    // --- ヒットテスト ---
-    struct HitResult
+    juce::Rectangle<float> noteBounds (const PianoRollNote& n) const
     {
-        int index = -1;              // notes 内のインデックス。-1ならヒットなし
-        bool onLeftEdge = false;
-        bool onRightEdge = false;
-    };
-    HitResult hitTestNote (juce::Point<float> pos) const;
+        const float x = (float) beatToX (n.startBeat);
+        const float w = (float) (n.lengthBeats * pixelsPerBeat);
+        const float y = (float) noteNumToY (n.noteNum);
+        return { x, y, juce::jmax (2.0f, w), (float) rowHeight - 1.0f };
+    }
 
-    void deleteSelectedNotes();
-    void selectAll();
-    void deselectAll();
-    void beginLyricEdit (int noteIndex);
-    void commitLyricEdit();
+    int findNoteAt (juce::Point<float> pos) const
+    {
+        for (int i = (int) notes.size() - 1; i >= 0; --i)
+            if (noteBounds (notes[(size_t) i]).contains (pos))
+                return i;
+        return -1;
+    }
 
-    void timerCallback() override; // 再生ヘッド再描画用
+    VoseAudioProcessor& processor;
+    VoseLookAndFeel* vlf = nullptr;
 
     std::vector<PianoRollNote> notes;
-    int64_t nextNoteId = 1;
+    int selectedIndex = -1;
 
-    double tempoBpm = 120.0;
-    double pixelsPerSecond = 90.0;
-    double pixelsPerRow = 16.0;
-    int    snapDivisionsPerBeat = 4; // 4 = 16分音符スナップ
-
-    // ループ範囲
-    bool   loopRangeValid = false;
-    double loopStartSec = 0.0;
-    double loopEndSec = 0.0;
-
-    // ドラッグ状態
-    DragMode dragMode = DragMode::none;
+    DragMode dragMode = DragMode::None;
     juce::Point<float> dragStartPos;
-    std::vector<PianoRollNote> dragOriginalNotes; // ドラッグ開始時点のスナップショット（元に戻す/差分計算用）
-    juce::Rectangle<float> rubberBandRect;
-    double loopDragAnchorSec = 0.0;
-    bool notesChangedDuringDrag = false;
+    PianoRollNote dragStartNote;
 
-    // 歌詞インライン編集
-    std::unique_ptr<juce::TextEditor> lyricEditor;
-    int lyricEditingIndex = -1;
+    double pixelsPerBeat = 40.0;
+    double scrollXBeats  = 0.0;
+    double playheadBeat  = 0.0;
 
-    std::function<double()> playheadProvider;
+    static constexpr int lowestNote  = 36;
+    static constexpr int highestNote = 84;
+    static constexpr int rowHeight   = 14;
+    static constexpr int keyboardWidth = 0; // 鍵盤ラベル列は今回省略
+
+    std::vector<std::unique_ptr<juce::TextEditor>> heldEditors;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PianoRollComponent)
 };
