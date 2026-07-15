@@ -254,7 +254,7 @@ class VoseAudioProcessorEditor : public juce::AudioProcessorEditor
 {
 public:
     explicit VoseAudioProcessorEditor (VoseAudioProcessor& p)
-        : juce::AudioProcessorEditor (&p), processor (p),
+        : juce::AudioProcessorEditor (&p), voseProcessor (p),
           pianoRoll (p), graphEditorTab (pianoRoll), voiceGallery (p), trackMixer (p)
     {
         setLookAndFeel (&lookAndFeel);
@@ -286,7 +286,7 @@ public:
     {
         g.fillAll (lookAndFeel.colourBackground);
         g.setColour (lookAndFeel.colourText);
-        g.setFont (juce::Font (juce::FontOptions (16.0f, juce::Font::bold)));
+        g.setFont (juce::Font (16.0f, juce::Font::bold));
         g.drawFittedText ("VO-SE (Phase 4 PoC)", getLocalBounds().removeFromTop (30).reduced (8, 0),
                            juce::Justification::centredLeft, 1);
     }
@@ -311,12 +311,12 @@ private:
         repaint();
     }
 
-    VoseAudioProcessor& processor;
+    VoseAudioProcessor& voseProcessor;
     VoseLookAndFeel lookAndFeel;
     juce::TextButton themeToggleButton { "ライトに切替" };
 
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
-    ControlsPanel controls { processor };
+    ControlsPanel controls { voseProcessor };
     PianoRollComponent pianoRoll;
     GraphEditorTab graphEditorTab;
     VoiceGalleryComponent voiceGallery;
