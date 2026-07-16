@@ -1,6 +1,7 @@
 // PluginEditor.h
-// フェーズ4 PoC: タブ構成（コントロール / ピアノロール / グラフエディタ / 音源ブラウザ / ミキサー）
-// + ダーク/ライトテーマ切り替え + buffer_ms調整 + ホスト同期トグル + UST書き出し。
+// フェーズ4 PoC v2: PianoRollComponent / GraphEditorComponent が
+// VoseAudioProcessorを直接知らない疎結合設計に変わったことに合わせて全面改訂。
+// データの橋渡し（processor <-> notes/curves の変換）はこのファイルの責務になる。
 
 #pragma once
 
@@ -14,7 +15,6 @@
 
 // ------------------------------------------------------------------
 // ControlsPanel: デバッグ用の生パラメータ調整パネル。
-// フェーズ4でbuffer_ms調整・ホスト同期トグル・UST書き出しを追加。
 // ------------------------------------------------------------------
 class ControlsPanel : public juce::Component
 {
@@ -100,7 +100,6 @@ public:
         addAndMakeVisible (playButton);
         addAndMakeVisible (stopButton);
 
-        // --- buffer_ms調整 ---
         bufferMsSlider.setRange ((double) VoseAudioProcessor::kMinBufferMs,
                                   (double) VoseAudioProcessor::kMaxBufferMs, 10.0);
         bufferMsSlider.setValue (processor.getActiveBufferMs(), juce::dontSendNotification);
@@ -112,7 +111,6 @@ public:
         addAndMakeVisible (bufferMsLabel);
         addAndMakeVisible (bufferMsSlider);
 
-        // --- ホストトランスポート同期 ---
         hostSyncButton.setClickingTogglesState (true);
         hostSyncButton.setToggleState (processor.getSyncToHostTransport(), juce::dontSendNotification);
         hostSyncButton.onClick = [this]
@@ -205,57 +203,74 @@ private:
 };
 
 // ------------------------------------------------------------------
-// GraphEditorTab: モード切替タブ(Gender/Tension/Breath) + GraphEditorComponent本体
+// GraphEditorTab: モード切替(Pitch/Gender/Tension/Breath) + ペンモードトグル
+// + GraphEditorComponent本体。
+// GraphEditorComponentはVoseAudioProcessorもPianoRollComponentも知らない
+// 独立コンポーネントなので、AutomationCurvesの受け渡しはこのタブが仲介する。
 // ------------------------------------------------------------------
 class GraphEditorTab : public juce::Component
 {
 public:
-    explicit GraphEditorTab (PianoRollComponent& roll) : graphEditor (roll)
+    GraphEditorTab()
     {
-        for (auto* b : { &genderTab, &tensionTab, &breathTab })
+        for (auto* b : { &pitchTab, &genderTab, &tensionTab, &breathTab })
         {
             b->setClickingTogglesState (true);
             addAndMakeVisible (b);
         }
+        pitchTab.setRadioGroupId (1);
         genderTab.setRadioGroupId (1);
         tensionTab.setRadioGroupId (1);
         breathTab.setRadioGroupId (1);
-        genderTab.setToggleState (true, juce::dontSendNotification);
+        genderTab.setToggleState (true, juce::dontSendNotification); // Genderを既定表示（フェーズ3までの慣習に合わせた）
+        graphEditor.setMode (AutomationParam::gender);
 
-        genderTab.onClick  = [this] { graphEditor.setMode (GraphEditorComponent::Mode::Gender); };
-        tensionTab.onClick = [this] { graphEditor.setMode (GraphEditorComponent::Mode::Tension); };
-        breathTab.onClick  = [this] { graphEditor.setMode (GraphEditorComponent::Mode::Breath); };
+        pitchTab.onClick   = [this] { graphEditor.setMode (AutomationParam::pitch); };
+        genderTab.onClick  = [this] { graphEditor.setMode (AutomationParam::gender); };
+        tensionTab.onClick = [this] { graphEditor.setMode (AutomationParam::tension); };
+        breathTab.onClick  = [this] { graphEditor.setMode (AutomationParam::breath); };
+
+        penModeButton.setClickingTogglesState (true);
+        penModeButton.onClick = [this] { graphEditor.setPenMode (penModeButton.getToggleState()); };
+        addAndMakeVisible (penModeButton);
 
         addAndMakeVisible (graphEditor);
     }
 
-    void setLookAndFeelRef (VoseLookAndFeel* lf) { graphEditor.setLookAndFeelRef (lf); }
+    GraphEditorComponent& getGraphEditor() { return graphEditor; }
 
     void resized() override
     {
         auto area = getLocalBounds();
         auto tabRow = area.removeFromTop (28);
-        const int w = tabRow.getWidth() / 3;
+        const int w = tabRow.getWidth() * 3 / 5 / 4; // 4モードボタン + ペンボタンで幅を分ける
+        pitchTab.setBounds (tabRow.removeFromLeft (w));
         genderTab.setBounds (tabRow.removeFromLeft (w));
         tensionTab.setBounds (tabRow.removeFromLeft (w));
-        breathTab.setBounds (tabRow);
+        breathTab.setBounds (tabRow.removeFromLeft (w));
+        tabRow.removeFromLeft (8);
+        penModeButton.setBounds (tabRow);
         graphEditor.setBounds (area);
     }
 
 private:
-    juce::TextButton genderTab { "Gender" }, tensionTab { "Tension" }, breathTab { "Breath" };
+    juce::TextButton pitchTab { "Pitch" }, genderTab { "Gender" }, tensionTab { "Tension" }, breathTab { "Breath" };
+    juce::TextButton penModeButton { "ペンモード" };
     GraphEditorComponent graphEditor;
 };
 
 // ------------------------------------------------------------------
 // VoseAudioProcessorEditor: トップレベル。タブ構成 + テーマ切替。
+//
+// PianoRollComponent/GraphEditorComponentはprocessorを直接知らないため、
+// このクラスが processor <-> notes/curves の変換を担う
+// （refreshPianoRollFromProcessor / pianoRoll.onNotesChanged / graphEditor.onCurvesChanged）。
 // ------------------------------------------------------------------
 class VoseAudioProcessorEditor : public juce::AudioProcessorEditor
 {
 public:
     explicit VoseAudioProcessorEditor (VoseAudioProcessor& p)
-        : juce::AudioProcessorEditor (&p), voseProcessor (p),
-          pianoRoll (p), graphEditorTab (pianoRoll), voiceGallery (p), trackMixer (p)
+        : juce::AudioProcessorEditor (&p), voseProcessor (p), voiceGallery (p), trackMixer (p)
     {
         setLookAndFeel (&lookAndFeel);
 
@@ -266,7 +281,46 @@ public:
         };
         addAndMakeVisible (themeToggleButton);
 
-        controls.onUstLoaded = [this] { pianoRoll.loadFromProcessor(); };
+        // --- ピアノロール: processorとの橋渡し ---
+        pianoRoll.setPlayheadSecondsProvider ([this] { return voseProcessor.getSongPositionSec(); });
+        pianoRoll.onNotesChanged = [this] (const std::vector<PianoRollNote>& notes, double /*tempoBpm*/)
+        {
+            std::vector<ScheduledSongNote> out;
+            out.reserve (notes.size());
+            for (const auto& n : notes)
+            {
+                ScheduledSongNote sn;
+                sn.startTimeSec = n.startTimeSec;
+                sn.durationSec  = n.durationSec;
+                sn.noteNum      = n.noteNum;
+                sn.lyric        = n.lyric;
+                sn.flags        = n.flags;
+                sn.pbs = n.pbs; sn.pbw = n.pbw; sn.pby = n.pby;
+                sn.vibrato = n.vibrato;
+                sn.genderOverride01  = n.genderOverride01;
+                sn.tensionOverride01 = n.tensionOverride01;
+                sn.breathOverride01  = n.breathOverride01;
+                out.push_back (std::move (sn));
+            }
+            voseProcessor.setEditedNotes (std::move (out));
+        };
+        refreshPianoRollFromProcessor();
+
+        // --- グラフエディタ: 現状はUIローカルに保持するのみ ---
+        // TODO: AutomationCurvesを実際の合成パイプライン（gender/tension/breath
+        // カーブ）へ反映する経路はまだ無い。PianoRollNoteのgenderOverride01等
+        // (ノート単位のスカラー)とAutomationCurves(任意時刻の連続カーブ)を
+        // どう統合するかは別途設計が必要なため、ここでは受け取って保持するだけ。
+        graphEditorTab.getGraphEditor().setPlayheadSecondsProvider (
+            [this] { return voseProcessor.getSongPositionSec(); });
+        graphEditorTab.getGraphEditor().onCurvesChanged = [this] (const AutomationCurves& c)
+        {
+            latestCurves = c;
+            juce::Logger::writeToLog ("VO-SE: AutomationCurvesが更新されましたが、"
+                                       "まだ合成パイプラインへは未接続です（TODO）。");
+        };
+
+        controls.onUstLoaded = [this] { refreshPianoRollFromProcessor(); };
         voiceGallery.onVoiceLoaded = [this] { /* 将来: トラック名表示の更新等 */ };
 
         tabs.addTab ("コントロール", juce::Colours::transparentBlack, &controls, false);
@@ -300,14 +354,45 @@ public:
     }
 
 private:
+    void refreshPianoRollFromProcessor()
+    {
+        auto snapshot = voseProcessor.getSongNotesSnapshot();
+        std::vector<PianoRollNote> converted;
+        converted.reserve (snapshot.size());
+        for (const auto& sn : snapshot)
+        {
+            PianoRollNote n;
+            n.startTimeSec = sn.startTimeSec;
+            n.durationSec  = sn.durationSec;
+            n.noteNum      = sn.noteNum;
+            n.lyric        = sn.lyric;
+            n.flags        = sn.flags;
+            n.pbs = sn.pbs; n.pbw = sn.pbw; n.pby = sn.pby;
+            n.vibrato = sn.vibrato;
+            n.genderOverride01  = sn.genderOverride01;
+            n.tensionOverride01 = sn.tensionOverride01;
+            n.breathOverride01  = sn.breathOverride01;
+            converted.push_back (std::move (n));
+        }
+        pianoRoll.setNotes (std::move (converted));
+        pianoRoll.setTempo (voseProcessor.getCurrentTempo());
+    }
+
     void applyThemeToChildren()
     {
-        pianoRoll.setLookAndFeelRef (&lookAndFeel);
-        graphEditorTab.setLookAndFeelRef (&lookAndFeel);
+        // PianoRollComponent/GraphEditorComponentはVoseColourIds+findColour()経由で
+        // 色を取得する設計になったため、setLookAndFeel(&lookAndFeel)が
+        // トップレベルに掛かっていれば子コンポーネントは自動的に継承する
+        // （個別のsetLookAndFeelRefは不要になった）。
+        // ただしVoseLookAndFeel側でVoseColourIdsに対応する色を
+        // setColour()していない場合、JUCEのデフォルト色にフォールバックする点に注意
+        // （VoseLookAndFeel.hの更新が別途必要な可能性がある）。
         voiceGallery.setLookAndFeelRef (&lookAndFeel);
         trackMixer.setLookAndFeelRef (&lookAndFeel);
         themeToggleButton.setButtonText (
             lookAndFeel.getTheme() == VoseLookAndFeel::Theme::Dark ? "ライトに切替" : "ダークに切替");
+        pianoRoll.repaint();
+        graphEditorTab.repaint();
         repaint();
     }
 
@@ -321,4 +406,6 @@ private:
     GraphEditorTab graphEditorTab;
     VoiceGalleryComponent voiceGallery;
     TrackMixerComponent trackMixer;
+
+    AutomationCurves latestCurves; // TODO: 合成パイプラインへの接続待ち
 };
