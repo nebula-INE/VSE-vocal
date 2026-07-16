@@ -71,17 +71,12 @@ endif()
 # ========================
 # ソースファイル定義
 # ========================
-# 1. 必須の基本フレームワーク/UIソース（絶対パスで指定）
-target_sources(VoseVocal
-    PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/PluginProcessor.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/PluginEditor.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/PianoRollComponent.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/GraphEditorComponent.cpp"
-)
-
-# 2. オプションソースの自動検出ロジック（絶対パスで判定・追加）
-set(VOSE_OPTIONAL_SOURCES
+# すべてのソースファイルを自動検出ロジックに統合
+set(VOSE_SOURCES
+    src/PluginProcessor.cpp
+    src/PluginEditor.cpp
+    src/PianoRollComponent.cpp
+    src/GraphEditorComponent.cpp
     src/OtoDatabase.cpp
     src/UstParser.cpp
     src/VowelClassifier.cpp
@@ -89,6 +84,17 @@ set(VOSE_OPTIONAL_SOURCES
     src/PitchCurveBuilder.cpp
     src/VoseBridge.cpp
 )
+
+foreach(SOURCE_FILE ${VOSE_SOURCES})
+    set(FULL_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}")
+    
+    if(EXISTS "${FULL_SOURCE_PATH}")
+        target_sources(VoseVocal PRIVATE "${FULL_SOURCE_PATH}")
+        message(STATUS "[VO-SE] Source detected and added: ${FULL_SOURCE_PATH}")
+    else()
+        message(STATUS "[VO-SE] Source NOT found (skipped): ${FULL_SOURCE_PATH}")
+    endif()
+endforeach()
 
 foreach(SOURCE_FILE ${VOSE_OPTIONAL_SOURCES})
     # フルパスを作って確実に判定する
