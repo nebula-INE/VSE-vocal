@@ -48,6 +48,7 @@ endif()
 # ========================
 juce_add_plugin(VoseVocal
     COMPANY_NAME              "VO-SE Project"
+    BUNDLE_ID                 "com.vose-project.vosevocal"  # <- 追加（スペースを排除）
     PLUGIN_MANUFACTURER_CODE  Vose
     PLUGIN_CODE               Vse1
     FORMATS                   ${VOSE_PLUGIN_FORMATS}
