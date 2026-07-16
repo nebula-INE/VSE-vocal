@@ -26,6 +26,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "UstProject.h"
+#include "VoseColourIds.h"
 #include <functional>
 #include <memory>
 #include <vector>
@@ -35,20 +36,7 @@
 // ------------------------------------------------------------------
 #ifndef VOSE_COLOUR_IDS_DEFINED
 #define VOSE_COLOUR_IDS_DEFINED
-enum VoseColourIds
-{
-    canvasBackground       = 0x2400001,
-    canvasRowAlt            = 0x2400002,
-    canvasGrid               = 0x2400003,
-    canvasGridBeat            = 0x2400004,
-    canvasGridMeasure          = 0x2400005,
-    canvasHeaderBackground       = 0x2400006,
-    keyboardWhite                 = 0x2400007,
-    keyboardBlack                  = 0x2400008,
-    accentPrimary                    = 0x2400009,
-    noteSelected                      = 0x240000A,
-};
-#endif
+
 
 // ------------------------------------------------------------------
 // PianoRollNote
