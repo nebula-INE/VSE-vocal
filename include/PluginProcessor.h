@@ -76,6 +76,12 @@ public:
     }
 
     double getCurrentTempo() const { return currentTempoBpm; }
+
+    // ピアノロールのカーソル表示用。songPositionSecはaudio threadが書き込むが、
+    // 表示目的の読み取り(message threadからのポーリング)なので厳密な
+    // アトミック保証までは求めない（実用上、現代の64bitプラットフォームで
+    // doubleの読み書きが割り込まれて破損することは事実上無い）。
+    double getSongPositionSec() const { return songPositionSec; }
     void setProjectName (const juce::String& name) { projectName = name; }
     juce::String getProjectName() const { return projectName; }
 
