@@ -807,17 +807,26 @@ jobs:
           path: juce_plugin/build/_deps
           key: juce-fetchcontent-${{ runner.os }}-7.0.12
 
+      - name: CMake を最新化
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.30.x'
+
       - name: Configure (CMake)
         shell: bash
         run: |
-          set -euo pipefail
-          EXTRA_ARGS=""
-          if [ "${{ matrix.os }}" = "macos-15-intel" ]; then
-            EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64"
-          elif [ "${{ matrix.os }}" = "macos-15" ]; then
-            EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64"
-          fi
-              cmake -B juce_plugin/build -S juce_plugin -DCMAKE_BUILD_TYPE=Release --fresh $EXTRA_ARGS
+            set -euo pipefail
+            EXTRA_ARGS=""
+            if [ "${{ matrix.os }}" = "macos-15-intel" ]; then
+                EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64"
+            elif [ "${{ matrix.os }}" = "macos-15" ]; then
+                EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64"
+            fi
+            export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+            cmake -B juce_plugin/build -S juce_plugin \
+                -G "Unix Makefiles" \
+                -DCMAKE_BUILD_TYPE=Release \
+                --fresh $EXTRA_ARGS
 
       - name: Build
         shell: bash
