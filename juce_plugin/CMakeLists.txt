@@ -61,8 +61,8 @@ juce_add_plugin(VoseVocal
 # ソースファイル定義（VOSE_OPTIONAL_SOURCES のループは削除）
 # ========================
 file(GLOB VOSE_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include/*.h"
 )
 
 if(NOT VOSE_SOURCES)
@@ -71,16 +71,6 @@ endif()
 
 target_sources(VoseVocal PRIVATE ${VOSE_SOURCES})
 
-# 必要に応じて各ファイルを個別にメッセージ表示（省略可）
-foreach(SOURCE_FILE ${VOSE_SOURCES})
-    set(FULL_SOURCE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}")
-    if(EXISTS "${FULL_SOURCE_PATH}")
-        target_sources(VoseVocal PRIVATE "${FULL_SOURCE_PATH}")
-        message(STATUS "[VO-SE] Source detected and added: ${FULL_SOURCE_PATH}")
-    else()
-        message(STATUS "[VO-SE] Source NOT found (skipped): ${FULL_SOURCE_PATH}")
-    endif()
-endforeach()
 
 # ========================
 # インクルードディレクトリ
