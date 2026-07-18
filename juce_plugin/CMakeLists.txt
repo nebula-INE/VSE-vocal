@@ -7,6 +7,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(VoseVocalPlugin VERSION 0.1.0 LANGUAGES CXX)
+project(VoseVocalPlugin VERSION 0.1.0 LANGUAGES C CXX)
 
 # ========================
 # C++ 標準設定
@@ -101,13 +102,20 @@ endif()
 # macOS 固有設定
 # ========================
 if(APPLE)
+    # メインターゲット（VoseVocal）の設定
+    if(TARGET VoseVocal)
+        set_target_properties(VoseVocal PROPERTIES
+            MACOSX_DEPLOYMENT_TARGET "11.0"
+        )
+    endif()
+
+    # 共有コードターゲット（VoseVocal_SharedCode）の設定
     if(TARGET VoseVocal_SharedCode)
         set_target_properties(VoseVocal_SharedCode PROPERTIES
             MACOSX_DEPLOYMENT_TARGET "11.0"
         )
     endif()
 endif()
-
 # ========================
 # Windows 固有設定
 # ========================
