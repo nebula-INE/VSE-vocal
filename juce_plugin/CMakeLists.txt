@@ -78,7 +78,9 @@ target_sources(VoseVocal PRIVATE ${VOSE_SOURCES})
 # ========================
 target_include_directories(VoseVocal
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include          # juce_plugin/include（必要なら）
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src           # リポジトリルートの src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include       # リポジトリルートの include
 )
 
 # ========================
