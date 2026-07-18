@@ -817,7 +817,7 @@ jobs:
           elif [ "${{ matrix.os }}" = "macos-15" ]; then
             EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64"
           fi
-          cmake -B juce_plugin/build -S juce_plugin -DCMAKE_BUILD_TYPE=Release $EXTRA_ARGS
+              cmake -B juce_plugin/build -S juce_plugin -DCMAKE_BUILD_TYPE=Release --fresh $EXTRA_ARGS
 
       - name: Build
         shell: bash
