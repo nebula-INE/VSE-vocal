@@ -822,12 +822,10 @@ jobs:
             elif [ "${{ matrix.os }}" = "macos-15" ]; then
                 EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64"
             fi
-            export SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
             cmake -B juce_plugin/build -S juce_plugin \
-                -G "Unix Makefiles" \
+                -G "Xcode" \
                 -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_OSX_SYSROOT="${SDKROOT}" \
-                -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
+                -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED="NO" \
                 --fresh $EXTRA_ARGS
 
       - name: Build
