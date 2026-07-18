@@ -823,9 +823,8 @@ jobs:
                 EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64"
             fi
             cmake -B juce_plugin/build -S juce_plugin \
-                -G "Xcode" \
+                -G "Unix Makefiles" \
                 -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED="NO" \
                 --fresh $EXTRA_ARGS
 
       - name: Build
