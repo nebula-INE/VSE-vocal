@@ -66,6 +66,12 @@ file(GLOB VOSE_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/../include/*.h"
 )
 
+# ★ プラグインでは不要なファイルを除外 ★
+list(REMOVE_ITEM VOSE_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/vose_streaming_final.cpp"
+    # 必要に応じて他のファイルも追加
+)
+
 if(NOT VOSE_SOURCES)
     message(FATAL_ERROR "[VO-SE] No source files found in src/ !")
 endif()
