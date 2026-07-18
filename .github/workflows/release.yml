@@ -810,7 +810,7 @@ jobs:
       - name: CMake を最新化
         uses: jwlawson/actions-setup-cmake@v2
         with:
-          cmake-version: '3.30.x'
+            cmake-version: '3.31.x'
 
       - name: Configure (CMake)
         shell: bash
@@ -826,6 +826,8 @@ jobs:
             cmake -B juce_plugin/build -S juce_plugin \
                 -G "Unix Makefiles" \
                 -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_OSX_SYSROOT="${SDKROOT}" \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
                 --fresh $EXTRA_ARGS
 
       - name: Build
