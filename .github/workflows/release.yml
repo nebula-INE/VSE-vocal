@@ -817,13 +817,23 @@ jobs:
         run: |
             set -euo pipefail
             EXTRA_ARGS=""
-            if [ "${{ matrix.os }}" = "macos-15-intel" ]; then
+            
+            # OSごとの最適なジェネレーターとアーキテクチャ設定
+            if [ "${{ matrix.os }}" = "windows-latest" ]; then
+                # Windowsはデフォルト（Visual Studio）にするか、Ninjaが手軽です
+                GENERATOR="-G \"Visual Studio 17 2022\" -A x64"
+            elif [ "${{ matrix.os }}" = "macos-15-intel" ]; then
+                GENERATOR="-G \"Unix Makefiles\""
                 EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64"
             elif [ "${{ matrix.os }}" = "macos-15" ]; then
+                GENERATOR="-G \"Unix Makefiles\""
                 EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64"
+            else
+                GENERATOR="-G \"Unix Makefiles\""
             fi
+
             cmake -B juce_plugin/build -S juce_plugin \
-                -G "Unix Makefiles" \
+                $GENERATOR \
                 -DCMAKE_BUILD_TYPE=Release \
                 --fresh $EXTRA_ARGS
 
