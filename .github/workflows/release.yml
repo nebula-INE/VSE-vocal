@@ -805,7 +805,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: juce_plugin/build/_deps
-          key: juce-fetchcontent-${{ runner.os }}-7.0.12
+          # 末尾に "-v2" などを追記して、古いキャッシュと完全に隔離します
+          key: juce-fetchcontent-${{ runner.os }}-7.0.12-v2
 
       - name: CMake を最新化
         uses: jwlawson/actions-setup-cmake@v2
