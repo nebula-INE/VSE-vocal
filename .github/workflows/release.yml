@@ -816,27 +816,34 @@ jobs:
         shell: bash
         run: |
             set -euo pipefail
-            EXTRA_ARGS=""
             
-            # OSごとの最適なジェネレーターとアーキテクチャ設定
             if [ "${{ matrix.os }}" = "windows-latest" ]; then
-                # Windowsはデフォルト（Visual Studio）にするか、Ninjaが手軽です
-                GENERATOR="-G \"Visual Studio 17 2022\" -A x64"
+                # Windows用: Visual Studio 17 2022 と 64bitアーキテクチャ指定
+                cmake -B juce_plugin/build -S juce_plugin \
+                    -G "Visual Studio 17 2022" -A x64 \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    --fresh
             elif [ "${{ matrix.os }}" = "macos-15-intel" ]; then
-                GENERATOR="-G \"Unix Makefiles\""
-                EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=x86_64"
+                # macOS Intel用
+                cmake -B juce_plugin/build -S juce_plugin \
+                    -G "Unix Makefiles" \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+                    --fresh
             elif [ "${{ matrix.os }}" = "macos-15" ]; then
-                GENERATOR="-G \"Unix Makefiles\""
-                EXTRA_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64"
+                # macOS Apple Silicon用
+                cmake -B juce_plugin/build -S juce_plugin \
+                    -G "Unix Makefiles" \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+                    --fresh
             else
-                GENERATOR="-G \"Unix Makefiles\""
+                # Linux (ubuntu-latest) 等
+                cmake -B juce_plugin/build -S juce_plugin \
+                    -G "Unix Makefiles" \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    --fresh
             fi
-
-            cmake -B juce_plugin/build -S juce_plugin \
-                $GENERATOR \
-                -DCMAKE_BUILD_TYPE=Release \
-                --fresh $EXTRA_ARGS
-
       - name: Build
         shell: bash
         run: |
