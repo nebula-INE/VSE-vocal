@@ -819,9 +819,10 @@ jobs:
             set -euo pipefail
             
             if [ "${{ matrix.os }}" = "windows-latest" ]; then
-                # Windows用: Visual Studio 17 2022 と 64bitアーキテクチャ指定
+                # Windows用: msvc-dev-cmd環境と最も相性が良く、並列ビルドが高速な Ninja を使用
+                # (Ninjaは環境変数のアーキテクチャを自動適用するため -A x64 は不要です)
                 cmake -B juce_plugin/build -S juce_plugin \
-                    -G "Visual Studio 17 2022" -A x64 \
+                    -G "Ninja" \
                     -DCMAKE_BUILD_TYPE=Release \
                     --fresh
             elif [ "${{ matrix.os }}" = "macos-15-intel" ]; then
