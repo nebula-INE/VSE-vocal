@@ -170,25 +170,78 @@ void VoseAudioProcessor::pushNote (int midiNoteNumber, int trackIndex)
     resolveAndPushNote (trackIndex, flatCurve, consumeNextLyric(), genderCurve, tensionCurve, breathCurve);
 }
 
+std::vector<double> VoseAudioProcessor::buildAutomatedCurve (AutomationParam param, double startSec, double durationSec,
+                                                              std::optional<double> explicitOverride,
+                                                              double fallbackScalar,
+                                                              const AutomationCurves& curvesSnapshot,
+                                                              int resolution) const
+{
+    std::vector<double> out ((size_t) resolution);
+    const int denom = juce::jmax (1, resolution - 1);
+
+    for (int j = 0; j < resolution; ++j)
+    {
+        if (explicitOverride.has_value())
+        {
+            out[(size_t) j] = *explicitOverride; // 最優先: ノート単位の明示上書き
+            continue;
+        }
+
+        const double tAbs = startSec + durationSec * ((double) j / (double) denom);
+        const auto automated = curvesSnapshot.evaluate (param, tAbs);
+        out[(size_t) j] = automated.value_or (fallbackScalar); // 次点: 連続カーブ、無ければFlags/APVTS
+    }
+    return out;
+}
+
 void VoseAudioProcessor::pushSongNote (const ScheduledSongNote& note)
 {
     constexpr int kRes = 128;
     const double durationMs = note.durationSec * 1000.0;
 
+    // GraphEditorComponent由来のAutomationCurvesをスナップショット取得
+    // (audio thread内でのロック保持時間を最小化するため、一度コピーしてから
+    //  ロック無しで評価する。頻度が低い操作なのでコピーコストは許容する)。
+    AutomationCurves curvesSnapshot;
+    {
+        const juce::SpinLock::ScopedLockType sl (automationCurvesLock);
+        curvesSnapshot = automationCurves;
+    }
+
     auto pitchCurve = vose_pitch::buildVibratoPitchCurveHz (note.noteNum, durationMs, note.vibrato, kRes);
+
+    // Pitchオートメーション（あれば）をベースピッチ(ビブラート込み)に乗算で加算適用。
+    // AutomationRanges::pitchValueToSemitones()で値域(-8192..8191)を semitone に変換してから
+    // 周波数比へ変換する（加算前の semitone 空間で足すのと数学的に等価）。
+    if (! curvesSnapshot.pitch.empty())
+    {
+        const int denom = juce::jmax (1, kRes - 1);
+        for (int j = 0; j < kRes; ++j)
+        {
+            const double tAbs = note.startTimeSec + note.durationSec * ((double) j / (double) denom);
+            if (auto v = curvesSnapshot.evaluate (AutomationParam::pitch, tAbs))
+            {
+                const double semitoneOffset = AutomationRanges::pitchValueToSemitones (*v);
+                pitchCurve[(size_t) j] *= std::pow (2.0, semitoneOffset / 12.0);
+            }
+        }
+    }
+
     auto portamentoCents = vose_pitch::buildPortamentoCentsCurve (note.pbs, note.pbw, note.pby, durationMs, kRes);
 
     const auto flagOverrides = parseUstFlags (note.flags);
-    const double genderVal  = note.genderOverride01.value_or (
-                                   flagOverrides.gender01.value_or  ((double) apvts.getRawParameterValue ("gender")->load()));
-    const double tensionVal = note.tensionOverride01.value_or (
-                                   flagOverrides.tension01.value_or ((double) apvts.getRawParameterValue ("tension")->load()));
-    const double breathVal  = note.breathOverride01.value_or (
-                                   flagOverrides.breath01.value_or  ((double) apvts.getRawParameterValue ("breath")->load()));
+    const double genderFallback  = flagOverrides.gender01.value_or  ((double) apvts.getRawParameterValue ("gender")->load());
+    const double tensionFallback = flagOverrides.tension01.value_or ((double) apvts.getRawParameterValue ("tension")->load());
+    const double breathFallback  = flagOverrides.breath01.value_or  ((double) apvts.getRawParameterValue ("breath")->load());
 
-    std::vector<double> genderCurve (kRes, genderVal);
-    std::vector<double> tensionCurve (kRes, tensionVal);
-    std::vector<double> breathCurve (kRes, breathVal);
+    // 優先順位: note.xxxOverride01（明示上書き）> AutomationCurves（連続カーブ）
+    //           > Flags > APVTSグローバル値（fallbackに集約済み）
+    auto genderCurve  = buildAutomatedCurve (AutomationParam::gender,  note.startTimeSec, note.durationSec,
+                                              note.genderOverride01,  genderFallback,  curvesSnapshot, kRes);
+    auto tensionCurve = buildAutomatedCurve (AutomationParam::tension, note.startTimeSec, note.durationSec,
+                                              note.tensionOverride01, tensionFallback, curvesSnapshot, kRes);
+    auto breathCurve  = buildAutomatedCurve (AutomationParam::breath,  note.startTimeSec, note.durationSec,
+                                              note.breathOverride01,  breathFallback,  curvesSnapshot, kRes);
 
     // USTは単一パート仕様のため、常にトラック0を使う（マルチトラックUST風合成は対象外）。
     resolveAndPushNote (0, pitchCurve, note.lyric, genderCurve, tensionCurve, breathCurve, portamentoCents);
