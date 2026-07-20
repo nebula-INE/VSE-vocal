@@ -11,6 +11,7 @@
 #include "UstParser.h"
 #include "UstFlags.h"
 #include "PitchCurveBuilder.h"
+#include "AutomationCurves.h"
 #include <array>
 #include <deque>
 
@@ -82,6 +83,16 @@ public:
     // アトミック保証までは求めない（実用上、現代の64bitプラットフォームで
     // doubleの読み書きが割り込まれて破損することは事実上無い）。
     double getSongPositionSec() const { return songPositionSec; }
+
+    // --- グラフエディタ(GraphEditorComponent)からのAutomationCurves反映 ---
+    // message threadから呼ぶ。以後、UST/ピアノロール由来のノート(pushSongNote)は
+    // ここで設定したカーブをGender/Tension/Breath/Pitchに反映する。
+    // ライブMIDI(pushNote)には適用しない（タイムライン基準の時間軸が無いため）。
+    void setAutomationCurves (AutomationCurves curves)
+    {
+        const juce::SpinLock::ScopedLockType sl (automationCurvesLock);
+        automationCurves = std::move (curves);
+    }
     void setProjectName (const juce::String& name) { projectName = name; }
     juce::String getProjectName() const { return projectName; }
 
@@ -119,6 +130,13 @@ private:
                               const std::vector<double>& breathCurve,
                               const std::vector<double>& portamentoOffsetsCents = {});
 
+    // AutomationCurves.evaluate() をノート区間全体にわたってサンプリングし、
+    // explicitOverride > オートメーション > fallbackScalar(Flags or APVTSグローバル) の
+    // 優先順位でresolution点のカーブを組み立てる。
+    std::vector<double> buildAutomatedCurve (AutomationParam param, double startSec, double durationSec,
+                                              std::optional<double> explicitOverride, double fallbackScalar,
+                                              const AutomationCurves& curvesSnapshot, int resolution) const;
+
     juce::String consumeNextLyric();
 
     // buffer_ms変更の実適用。processBlock冒頭から呼ぶ。
@@ -139,6 +157,9 @@ private:
 
     juce::String prevLyric;
     juce::String projectName { "Untitled" };
+
+    mutable juce::SpinLock automationCurvesLock;
+    AutomationCurves automationCurves; // GraphEditorComponent由来。message threadから設定、audio threadでスナップショット読み取り。
 
     mutable juce::SpinLock         songNotesLock;
     std::vector<ScheduledSongNote> songNotes;
