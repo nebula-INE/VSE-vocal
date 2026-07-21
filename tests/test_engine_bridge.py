@@ -1,5 +1,4 @@
-from unittest.mock import MagicMock, patch
-import ctypes
+from unittest.mock import patch
 from modules.gui.core_manager import VoseCoreManager
 
 def test_core_manager_fallback():
