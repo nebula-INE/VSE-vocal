@@ -1,4 +1,3 @@
-import pytest
 from modules.data.oto_parser import OtoParser, OtoEntry
 
 class TestOtoParser:
