@@ -677,15 +677,30 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           QT_MEDIA_BACKEND: ffmpeg
         run: |
-          # pytest と必要なプラグインをインストール
-          python -m pip install pytest pytest-xdist
+            # 1. テスト用依存パッケージをインストール
+            python -m pip install --upgrade pip
+            python -m pip install pytest pytest-xdist pytest-cov pytest-qt
 
-          # パッケージ化された実行ファイルが存在するか確認（デバッグ用）
-          echo "Checking dist/ contents:"
-          ls -la dist/ || true
+            # 2. ビルド成果物の確認（デバッグ用）
+            echo "Checking dist/ contents:"
+            ls -la dist/ || true
 
-          # スモークテストを実行（失敗したら即座に停止）
-          python -m pytest tests/ -v -m smoke --maxfail=1
+            # 3. スモークテスト（アプリ起動テスト）を実行
+            #    失敗したら即座に停止（--maxfail=1）
+            echo "--- Running Smoke Tests ---"
+            python -m pytest tests/ -v -m smoke --maxfail=1
+
+            # 4. 単体テスト（パーサー・データモデル・GUIコンポーネント）を実行
+            #    カバレッジレポート（XML + ターミナル）を生成し、並列実行（-n auto）
+            echo "--- Running Unit Tests with Coverage ---"
+            python -m pytest tests/ -v -m unit \
+                --cov=modules \
+                --cov-report=xml:coverage.xml \
+                --cov-report=term \
+                -n auto
+
+            # 5. カバレッジ結果をファイルとして出力（後続ステップでアップロード可能）
+            echo "✅ Coverage report saved to coverage.xml"
 
       - name: 🍎 Optional notarize macOS app (recommended)
         if: startsWith(matrix.os, 'macos')
