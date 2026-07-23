@@ -17,5 +17,7 @@ def test_add_note(qtbot):
     # ノートが 1 つ増えているか
     assert len(widget.notes_list) == 1
     note = widget.notes_list[0]
-    # y=100 の位置に対応する MIDI ノート番号が 60 であることを確認
-    assert note.note_number == 60
+
+    # y=100 の位置に対応する MIDI ノート番号を計算（マッピングに依存しない）
+    expected_note = 127 - int(100 / widget.key_height_pixels)
+    assert note.note_number == expected_note
