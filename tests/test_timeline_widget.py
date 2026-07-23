@@ -6,20 +6,16 @@ from modules.gui.timeline_widget import TimelineWidget
 def test_add_note(qtbot):
     widget = TimelineWidget()
     qtbot.addWidget(widget)
-    
-    # 初期ノート数 0
+
     assert len(widget.notes_list) == 0
-    
-    # ダブルクリックでノート追加をシミュレート (pos: x=100, y=100)
-    # QTest.mouseClick 대신 qtbot.mouseClick 사용
+
     qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=(100, 100), delay=100)
     qtbot.mouseDClick(widget, Qt.MouseButton.LeftButton, pos=(100, 100))
-    
-    # ノートが1つ増えているか
+
     assert len(widget.notes_list) == 1
     note = widget.notes_list[0]
-    assert note.note_number == 60  # y=100 기준 계산
-
+    assert note.note_number == 60
+    
 @pytest.mark.unit
 def test_undo_redo(qtbot):
     widget = TimelineWidget()
