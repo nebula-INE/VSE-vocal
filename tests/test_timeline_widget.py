@@ -1,5 +1,5 @@
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from modules.gui.timeline_widget import TimelineWidget
 
 @pytest.mark.unit
@@ -11,8 +11,8 @@ def test_add_note(qtbot):
     assert len(widget.notes_list) == 0
 
     # ダブルクリックでノート追加をシミュレート (pos: x=100, y=100)
-    qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=(100, 100), delay=100)
-    qtbot.mouseDClick(widget, Qt.MouseButton.LeftButton, pos=(100, 100))
+    pos = QPoint(100, 100)
+    qtbot.mouseDClick(widget, Qt.MouseButton.LeftButton, pos=pos, delay=100)
 
     # ノートが 1 つ増えているか
     assert len(widget.notes_list) == 1
