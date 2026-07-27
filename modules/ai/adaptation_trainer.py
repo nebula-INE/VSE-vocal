@@ -8,7 +8,6 @@ from modules.ai.adaptation_dataset import UTAUAdaptationDataset
 import os
 import json
 from tqdm import tqdm
-import numpy as np
 
 class AdaptationTrainer:
     def __init__(

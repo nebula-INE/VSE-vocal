@@ -4,7 +4,7 @@ import torchaudio
 import numpy as np
 import os
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from modules.data.oto_parser import OtoParser
 
 class UTAUAdaptationDataset(Dataset):
