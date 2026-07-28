@@ -5,6 +5,10 @@ setuptools>=70,<81
 pyinstaller==6.13.0
 backports.tarfile
 mido==1.3.2
+torch
+torchaudio
+transformers
+peft
 onnxruntime
 sounddevice
 soundfile
